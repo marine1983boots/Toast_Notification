@@ -489,12 +489,15 @@ function Register-ToastAppId {
     .SYNOPSIS
         Registers a custom AppUserModelId for toast notifications
     .DESCRIPTION
-        Based on BurntToast module approach - registers AppId in HKCU registry
-        to ensure toasts display properly in Windows 10/11
+        Registers AppId in HKCU registry with enhanced error handling.
+        Returns detailed status object for caller decision-making.
     .PARAMETER AppId
         The AppUserModelId to register
     .PARAMETER DisplayName
         Display name shown in Windows notification settings
+    .EXAMPLE
+        $Result = Register-ToastAppId -AppId "MyApp.ID" -DisplayName "My Application"
+        if ($Result.Success) { Write-Host "Registration successful" }
     #>
     [CmdletBinding()]
     param(
@@ -505,25 +508,403 @@ function Register-ToastAppId {
         [String]$DisplayName = "Toast Notification"
     )
 
+    $Result = [PSCustomObject]@{
+        Success = $false
+        ErrorCategory = ""
+        IsGPORestricted = $false
+        ErrorMessage = ""
+        CanRetry = $false
+    }
+
     try {
         $RegPath = "HKCU:\Software\Classes\AppUserModelId\$AppId"
+        $ParentPath = "HKCU:\Software\Classes"
 
-        if (-not (Test-Path $RegPath)) {
+        # Pre-flight check: Verify parent path is accessible
+        if (-not (Test-Path $ParentPath)) {
+            try {
+                New-Item -Path $ParentPath -Force -ErrorAction Stop | Out-Null
+                Write-Verbose "Created parent path: $ParentPath"
+            }
+            catch [System.UnauthorizedAccessException] {
+                $Result.ErrorCategory = "PARENT_PATH_ACCESS_DENIED"
+                $Result.IsGPORestricted = $true
+                $Result.ErrorMessage = "GPO policy prevents access to $ParentPath"
+                Write-Warning $Result.ErrorMessage
+                return $Result
+            }
+        }
+
+        # Check if AppId already exists
+        if (Test-Path $RegPath) {
+            try {
+                $Existing = Get-ItemProperty -Path $RegPath -ErrorAction Stop
+                Write-Verbose "AppUserModelId already registered: $AppId"
+                $Result.Success = $true
+                return $Result
+            }
+            catch {
+                $Result.ErrorCategory = "EXISTING_APPID_UNREADABLE"
+                $Result.ErrorMessage = "AppId exists but cannot be read: $($_.Exception.Message)"
+                Write-Warning $Result.ErrorMessage
+                return $Result
+            }
+        }
+
+        # Register new AppId
+        try {
             Write-Verbose "Registering AppUserModelId: $AppId"
-            New-Item -Path $RegPath -Force | Out-Null
-            Set-ItemProperty -Path $RegPath -Name "DisplayName" -Value $DisplayName -Type String
-            Write-Verbose "AppUserModelId registered successfully"
-            return $true
+            New-Item -Path $RegPath -Force -ErrorAction Stop | Out-Null
+        }
+        catch [System.UnauthorizedAccessException] {
+            $Result.ErrorCategory = "APPID_CREATE_ACCESS_DENIED"
+            $Result.IsGPORestricted = $true
+            $Result.ErrorMessage = "GPO policy prevents AppId creation"
+            Write-Warning $Result.ErrorMessage
+            return $Result
+        }
+
+        try {
+            Set-ItemProperty -Path $RegPath -Name "DisplayName" -Value $DisplayName -Type String -ErrorAction Stop
+        }
+        catch [System.UnauthorizedAccessException] {
+            $Result.ErrorCategory = "DISPLAYNAME_SET_ACCESS_DENIED"
+            $Result.IsGPORestricted = $true
+            $Result.ErrorMessage = "GPO policy prevents DisplayName property write"
+            Write-Warning $Result.ErrorMessage
+            return $Result
+        }
+
+        # Verify registration succeeded
+        try {
+            $Verify = Get-ItemProperty -Path $RegPath -ErrorAction Stop
+            if ($Verify.DisplayName -eq $DisplayName) {
+                Write-Verbose "AppUserModelId registered and verified successfully"
+                $Result.Success = $true
+            }
+            else {
+                $Result.ErrorCategory = "VERIFICATION_FAILED"
+                $Result.ErrorMessage = "Registration succeeded but verification failed"
+                Write-Warning $Result.ErrorMessage
+            }
+        }
+        catch {
+            $Result.ErrorCategory = "VERIFICATION_FAILED"
+            $Result.ErrorMessage = "Registration succeeded but not readable: $($_.Exception.Message)"
+            Write-Warning $Result.ErrorMessage
+        }
+
+        return $Result
+    }
+    catch {
+        $Result.ErrorCategory = "REGISTRATION_EXCEPTION"
+        $Result.ErrorMessage = $_.Exception.Message
+        Write-Warning "AppId registration exception: $($_.Exception.Message)"
+        return $Result
+    }
+}
+
+function Test-CorporateEnvironment {
+    <#
+    .SYNOPSIS
+        Detects corporate environment restrictions before toast display
+    .DESCRIPTION
+        Proactively tests for GPO restrictions, WinRT availability, and
+        notification system status. Returns detailed restriction information.
+    .EXAMPLE
+        $CorpEnv = Test-CorporateEnvironment
+        if ($CorpEnv.IsRestricted) {
+            Write-Warning "Restrictions: $($CorpEnv.Restrictions -join ', ')"
+            Write-Warning "Recommended fallback: $($CorpEnv.RecommendedFallback)"
+        }
+    #>
+    [CmdletBinding()]
+    param()
+
+    $Result = [PSCustomObject]@{
+        IsRestricted = $false
+        Restrictions = @()
+        CanWriteHKCU = $true
+        WinRTAvailable = $true
+        NotificationSystemEnabled = $true
+        RecommendedFallback = 'None'
+    }
+
+    # Test 1: HKCU write capability (GPO restrictions)
+    try {
+        $TestPath = "HKCU:\Software\ToastNotification\_CorpEnvTest"
+        New-Item -Path $TestPath -Force -ErrorAction Stop | Out-Null
+        Remove-Item -Path $TestPath -Force -ErrorAction SilentlyContinue
+        Write-Verbose "HKCU write test: PASS"
+    }
+    catch [System.UnauthorizedAccessException] {
+        $Result.CanWriteHKCU = $false
+        $Result.IsRestricted = $true
+        $Result.Restrictions += "HKCU_WRITE_DENIED"
+        Write-Verbose "HKCU write test: FAIL (Access Denied)"
+    }
+    catch {
+        Write-Verbose "HKCU write test: FAIL ($($_.Exception.Message))"
+    }
+
+    # Test 2: WinRT API accessibility
+    try {
+        $WinRTType = [Windows.UI.Notifications.ToastNotificationManager]
+        if ($null -eq $WinRTType) {
+            $Result.WinRTAvailable = $false
+            $Result.IsRestricted = $true
+            $Result.Restrictions += "WINRT_UNAVAILABLE"
         }
         else {
-            Write-Verbose "AppUserModelId already registered: $AppId"
-            return $true
+            Write-Verbose "WinRT API test: PASS"
         }
     }
     catch {
-        Write-Warning "Failed to register AppUserModelId: $($_.Exception.Message)"
+        $Result.WinRTAvailable = $false
+        $Result.IsRestricted = $true
+        $Result.Restrictions += "WINRT_UNAVAILABLE"
+        Write-Verbose "WinRT API test: FAIL"
+    }
+
+    # Test 3: Windows notification system status
+    try {
+        $NotifSettings = Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\PushNotifications" -ErrorAction SilentlyContinue
+        if ($NotifSettings.ToastEnabled -eq 0) {
+            $Result.NotificationSystemEnabled = $false
+            $Result.IsRestricted = $true
+            $Result.Restrictions += "NOTIFICATIONS_DISABLED"
+            Write-Verbose "Notification system test: DISABLED"
+        }
+        else {
+            Write-Verbose "Notification system test: ENABLED"
+        }
+    }
+    catch {
+        Write-Verbose "Notification system test: UNKNOWN"
+    }
+
+    # Determine recommended fallback method
+    if ($Result.IsRestricted) {
+        # Check user context
+        $IsInteractive = [Environment]::UserInteractive
+        $IsSystem = ([System.Security.Principal.WindowsIdentity]::GetCurrent()).Name -eq "NT AUTHORITY\SYSTEM"
+
+        if ($IsInteractive -and -not $IsSystem) {
+            $Result.RecommendedFallback = 'MessageBox'
+        }
+        elseif (-not $IsSystem) {
+            $Result.RecommendedFallback = 'EventLog'
+        }
+        else {
+            $Result.RecommendedFallback = 'LogFile'
+        }
+
+        Write-Verbose "Corporate restrictions detected: $($Result.Restrictions.Count) restriction(s)"
+    }
+
+    return $Result
+}
+
+function Test-WinRTAssemblies {
+    <#
+    .SYNOPSIS
+        Validates WinRT assemblies are functional, not just loaded
+    .DESCRIPTION
+        Tests that ToastNotificationManager and XmlDocument types are
+        loaded and can be instantiated. Returns true if functional.
+    .EXAMPLE
+        if (-not (Test-WinRTAssemblies)) {
+            Write-Warning "WinRT assemblies not functional"
+        }
+    #>
+    [CmdletBinding()]
+    param()
+
+    try {
+        # Test ToastNotificationManager type loaded
+        $ToastType = [Windows.UI.Notifications.ToastNotificationManager]
+        if ($null -eq $ToastType) {
+            Write-Verbose "ToastNotificationManager type not loaded"
+            return $false
+        }
+
+        # Test XmlDocument type loaded
+        $XmlType = [Windows.Data.Xml.Dom.XmlDocument]
+        if ($null -eq $XmlType) {
+            Write-Verbose "XmlDocument type not loaded"
+            return $false
+        }
+
+        # Test GetDefault() method accessible
+        try {
+            $TestDefault = [Windows.UI.Notifications.ToastNotificationManager]::GetDefault
+            if ($null -eq $TestDefault) {
+                Write-Verbose "GetDefault() method not accessible"
+                return $false
+            }
+        }
+        catch {
+            Write-Verbose "GetDefault() test failed: $($_.Exception.Message)"
+            return $false
+        }
+
+        Write-Verbose "WinRT assemblies validation: PASS"
+        return $true
+    }
+    catch {
+        Write-Verbose "WinRT assemblies validation: FAIL ($($_.Exception.Message))"
         return $false
     }
+}
+
+function Show-FallbackNotification {
+    <#
+    .SYNOPSIS
+        Displays notification when toast fails using fallback methods
+    .DESCRIPTION
+        Implements 3-tier fallback: MessageBox -> EventLog -> LogFile
+        Auto-detects user context and selects appropriate method.
+    .PARAMETER Title
+        Notification title
+    .PARAMETER Message
+        Notification content
+    .PARAMETER Method
+        'MessageBox', 'EventLog', 'LogFile', or 'Auto' (default: Auto)
+    .PARAMETER Severity
+        'Information', 'Warning', 'Error' (default: Warning)
+    .EXAMPLE
+        Show-FallbackNotification -Title "Update Required" -Message "Please restart" -Method Auto -Severity Warning
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [String]$Title,
+
+        [Parameter(Mandatory = $true)]
+        [String]$Message,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateSet('MessageBox', 'EventLog', 'LogFile', 'Auto')]
+        [String]$Method = 'Auto',
+
+        [Parameter(Mandatory = $false)]
+        [ValidateSet('Information', 'Warning', 'Error')]
+        [String]$Severity = 'Warning'
+    )
+
+    $FallbackSucceeded = $false
+
+    # Auto-detect method if requested
+    if ($Method -eq 'Auto') {
+        $IsInteractive = [Environment]::UserInteractive
+        $IsSystem = ([System.Security.Principal.WindowsIdentity]::GetCurrent()).Name -eq "NT AUTHORITY\SYSTEM"
+
+        if ($IsInteractive -and -not $IsSystem) {
+            $Method = 'MessageBox'
+        }
+        elseif (-not $IsSystem) {
+            $Method = 'EventLog'
+        }
+        else {
+            $Method = 'LogFile'
+        }
+        Write-Verbose "Auto-selected fallback method: $Method"
+    }
+
+    # Attempt primary method
+    switch ($Method) {
+        'MessageBox' {
+            try {
+                Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+
+                $Icon = switch ($Severity) {
+                    'Error' { [System.Windows.Forms.MessageBoxIcon]::Error }
+                    'Warning' { [System.Windows.Forms.MessageBoxIcon]::Warning }
+                    default { [System.Windows.Forms.MessageBoxIcon]::Information }
+                }
+
+                [System.Windows.Forms.MessageBox]::Show($Message, $Title, [System.Windows.Forms.MessageBoxButtons]::OK, $Icon) | Out-Null
+                Write-Output "[OK] Fallback notification displayed via MessageBox"
+                $FallbackSucceeded = $true
+            }
+            catch {
+                Write-Warning "MessageBox fallback failed: $($_.Exception.Message)"
+                Write-Warning "Cascading to EventLog..."
+                $Method = 'EventLog'
+            }
+        }
+    }
+
+    # Cascade to EventLog if MessageBox failed
+    if (-not $FallbackSucceeded -and $Method -eq 'EventLog') {
+        try {
+            $EventLogSource = "ToastNotification"
+
+            # Check if event source exists
+            if (-not [System.Diagnostics.EventLog]::SourceExists($EventLogSource)) {
+                # Try to create it (requires admin rights)
+                try {
+                    New-EventLog -LogName Application -Source $EventLogSource -ErrorAction Stop
+                    Write-Verbose "Created event source: $EventLogSource"
+                }
+                catch {
+                    Write-Warning "Cannot create event source (requires admin): $($_.Exception.Message)"
+                    Write-Warning "Cascading to LogFile..."
+                    $Method = 'LogFile'
+                }
+            }
+
+            if ([System.Diagnostics.EventLog]::SourceExists($EventLogSource)) {
+                $EventType = switch ($Severity) {
+                    'Error' { 'Error' }
+                    'Warning' { 'Warning' }
+                    default { 'Information' }
+                }
+
+                $EventMessage = "$Title`n`n$Message"
+                Write-EventLog -LogName Application -Source $EventLogSource -EntryType $EventType -EventId 1000 -Message $EventMessage -ErrorAction Stop
+
+                Write-Output "[OK] Fallback notification logged to Event Log"
+                $FallbackSucceeded = $true
+            }
+        }
+        catch {
+            Write-Warning "EventLog fallback failed: $($_.Exception.Message)"
+            Write-Warning "Cascading to LogFile..."
+            $Method = 'LogFile'
+        }
+    }
+
+    # Final cascade to LogFile (always succeeds)
+    if (-not $FallbackSucceeded -and $Method -eq 'LogFile') {
+        try {
+            $LogDir = Join-Path $env:ProgramData "ToastNotification\Logs"
+            if (-not (Test-Path $LogDir)) {
+                New-Item -Path $LogDir -ItemType Directory -Force | Out-Null
+            }
+
+            $LogFile = Join-Path $LogDir "FallbackNotifications.log"
+            $Timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+            $LogEntry = @"
+
+========================================
+[$Timestamp] [$Severity] $Title
+========================================
+$Message
+========================================
+
+"@
+            Add-Content -Path $LogFile -Value $LogEntry -Force
+            Write-Output "[OK] Fallback notification written to log: $LogFile"
+            $FallbackSucceeded = $true
+        }
+        catch {
+            Write-Error "All fallback methods failed: $($_.Exception.Message)"
+            $FallbackSucceeded = $false
+        }
+    }
+
+    return $FallbackSucceeded
 }
 
 #endregion Helper Functions
@@ -918,9 +1299,54 @@ If ($XMLValid -eq $True) {
         ElseIf ($Hour -gt 16) { $CustomHello = "Good Evening $($Firstname)" }
         Else { $CustomHello = "Good Afternoon $($Firstname)" }
 
-        #Load Assemblies
-        [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
-        [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
+        #Load WinRT Assemblies with validation
+        Write-Verbose "Loading Windows Runtime assemblies..."
+        $Script:UseForceFailback = $false
+        $Script:FallbackReason = ""
+        $Script:CorporateEnvironment = $null
+
+        try {
+            $ErrorActionPreference = 'Stop'
+
+            # Load ToastNotificationManager
+            try {
+                [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
+                Write-Verbose "[OK] Windows.UI.Notifications assembly loaded"
+            }
+            catch [System.IO.FileNotFoundException] {
+                Write-Error "WinRT assembly not found - Windows 10/11 required"
+                throw "Windows.UI.Notifications assembly not available"
+            }
+
+            # Load XmlDocument
+            try {
+                [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
+                Write-Verbose "[OK] Windows.Data.Xml.Dom assembly loaded"
+            }
+            catch [System.IO.FileNotFoundException] {
+                Write-Error "WinRT XML assembly not found"
+                throw "Windows.Data.Xml.Dom assembly not available"
+            }
+
+            # Validate assemblies are functional
+            if (-not (Test-WinRTAssemblies)) {
+                Write-Warning "WinRT assemblies loaded but validation failed"
+
+                # Detect corporate environment
+                $CorpEnv = Test-CorporateEnvironment
+                if ($CorpEnv.IsRestricted) {
+                    Write-Warning "Corporate restrictions: $($CorpEnv.Restrictions -join ', ')"
+                    Write-Warning "Recommended fallback: $($CorpEnv.RecommendedFallback)"
+                    $Script:CorporateEnvironment = $CorpEnv
+                }
+            }
+        }
+        catch {
+            Write-Error "Critical: WinRT assemblies unavailable: $($_.Exception.Message)"
+            $Script:UseForceFailback = $true
+            $Script:FallbackReason = "WinRT: $($_.Exception.Message)"
+            Write-Warning "Will use fallback notification methods only"
+        }
 
         #Get stage configuration if progressive mode enabled
         If ($EnableProgressive) {
@@ -1147,20 +1573,164 @@ If ($XMLValid -eq $True) {
             }
         }
 
-        # Register AppUserModelId (based on BurntToast approach for reliable display)
+        # Register AppUserModelId with enhanced error handling
         Write-Output "Registering AppUserModelId for toast display..."
-        $AppIdRegistered = Register-ToastAppId -AppId $LauncherID -DisplayName "Toast Notification System"
 
-        if (-not $AppIdRegistered) {
-            Write-Warning "AppId registration failed - toast may not display correctly"
+        if ($Script:UseForceFailback) {
+            Write-Warning "Skipping AppId registration - WinRT unavailable"
+            $AppIdRegistered = [PSCustomObject]@{
+                Success = $false
+                ErrorCategory = "WINRT_UNAVAILABLE"
+                IsGPORestricted = $false
+                ErrorMessage = "WinRT not available"
+                CanRetry = $false
+            }
+        }
+        else {
+            try {
+                $AppIdRegistered = Register-ToastAppId -AppId $LauncherID -DisplayName "Toast Notification System"
+
+                if ($AppIdRegistered.Success) {
+                    Write-Output "[OK] AppUserModelId registered successfully"
+                }
+                else {
+                    Write-Warning "AppId registration failed: $($AppIdRegistered.ErrorCategory)"
+
+                    if ($AppIdRegistered.IsGPORestricted) {
+                        Write-Warning "========================================="
+                        Write-Warning "[CORPORATE RESTRICTION DETECTED]"
+                        Write-Warning "GPO policy prevents AppId registration"
+                        Write-Warning "Toast notifications may fail to display"
+                        Write-Warning "Fallback notification will be used if needed"
+                        Write-Warning "========================================="
+
+                        # Pre-emptive corporate environment detection
+                        if ($null -eq $Script:CorporateEnvironment) {
+                            $Script:CorporateEnvironment = Test-CorporateEnvironment
+                        }
+                    }
+                }
+            }
+            catch {
+                Write-Warning "AppId registration exception: $($_.Exception.Message)"
+                $AppIdRegistered = [PSCustomObject]@{
+                    Success = $false
+                    ErrorCategory = "REGISTRATION_EXCEPTION"
+                    IsGPORestricted = $false
+                    ErrorMessage = $_.Exception.Message
+                    CanRetry = $false
+                }
+            }
         }
 
-        # Display toast
-        Write-Output "Displaying toast notification..."
-        [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($LauncherID).Show($ToastMessage)
+        # Display toast with comprehensive error handling
+        Write-Output "Preparing to display toast notification..."
+        $ToastDisplaySucceeded = $false
 
-        Write-Output "Toast displayed successfully"
-        If ($EnableProgressive) {
+        try {
+            $ErrorActionPreference = 'Stop'
+
+            # Step 1: Validate WinRT assemblies
+            if (-not (Test-WinRTAssemblies)) {
+                throw "WinRT assemblies not available or not functional"
+            }
+
+            # Step 2: Check AppId registration status
+            if ($AppIdRegistered) {
+                if (-not $AppIdRegistered.Success) {
+                    if ($AppIdRegistered.IsGPORestricted) {
+                        throw "Corporate GPO restrictions prevent AppId registration"
+                    }
+                    Write-Warning "Attempting toast despite AppId registration failure..."
+                }
+            }
+
+            # Step 3: Create toast notifier
+            try {
+                $Notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($LauncherID)
+                if ($null -eq $Notifier) {
+                    throw "CreateToastNotifier returned null"
+                }
+            }
+            catch [System.UnauthorizedAccessException] {
+                throw "Access denied creating toast notifier - corporate restrictions"
+            }
+
+            # Step 4: Display toast
+            Write-Output "Displaying toast notification..."
+            try {
+                $Notifier.Show($ToastMessage)
+                Write-Output "[OK] Toast displayed successfully"
+                $ToastDisplaySucceeded = $true
+            }
+            catch [System.UnauthorizedAccessException] {
+                # THIS IS THE "Access is denied" ERROR
+                throw "Access denied calling Show() - corporate WinRT restrictions"
+            }
+            catch [System.Exception] {
+                $ExceptionType = $_.Exception.GetType().Name
+                throw "Toast display failed ($ExceptionType): $($_.Exception.Message)"
+            }
+        }
+        catch {
+            # Toast display failed - use fallback
+            $ToastDisplaySucceeded = $false
+            $ErrorDetails = $_.Exception.Message
+
+            Write-Warning "========================================="
+            Write-Warning "[TOAST DISPLAY FAILED]"
+            Write-Warning "Error: $ErrorDetails"
+            Write-Warning "========================================="
+
+            # Prepare fallback notification
+            $FallbackTitle = if ($Priority) { "[URGENT] $EventTitle" } else { $EventTitle }
+            $FallbackMessage = @"
+$EventText
+
+Action Required: $ButtonTitle
+
+This notification could not be displayed as a toast due to corporate environment restrictions.
+
+Technical Details: $ErrorDetails
+"@
+
+            $FallbackSeverity = if ($Priority -or $ToastScenario -eq 'alarm') { 'Warning' } else { 'Information' }
+
+            # Attempt fallback
+            Write-Output "Attempting fallback notification method..."
+            $FallbackResult = Show-FallbackNotification -Title $FallbackTitle -Message $FallbackMessage -Method Auto -Severity $FallbackSeverity
+
+            if ($FallbackResult) {
+                Write-Output "[OK] Fallback notification displayed successfully"
+
+                # Log fallback usage for IT monitoring
+                try {
+                    $FallbackLogPath = "HKLM:\SOFTWARE\ToastNotification\FallbackUsage"
+                    if (-not (Test-Path $FallbackLogPath)) {
+                        New-Item -Path $FallbackLogPath -Force | Out-Null
+                    }
+
+                    $FallbackCount = (Get-ItemProperty -Path $FallbackLogPath -Name "Count" -ErrorAction SilentlyContinue).Count
+                    if ($null -eq $FallbackCount) { $FallbackCount = 0 }
+                    $FallbackCount++
+
+                    Set-ItemProperty -Path $FallbackLogPath -Name "Count" -Value $FallbackCount -Type DWord -Force
+                    Set-ItemProperty -Path $FallbackLogPath -Name "LastFallback" -Value (Get-Date).ToString('s') -Type String -Force
+                    Set-ItemProperty -Path $FallbackLogPath -Name "LastError" -Value $ErrorDetails -Type String -Force
+                }
+                catch {
+                    Write-Verbose "Could not log fallback usage: $($_.Exception.Message)"
+                }
+            }
+            else {
+                Write-Error "Fallback notification also failed - user was not notified"
+            }
+        }
+        finally {
+            Write-Verbose "Toast display operation completed: Success=$ToastDisplaySucceeded"
+        }
+        # Continue with progressive logic (only if toast succeeded)
+        If ($ToastDisplaySucceeded -and $EnableProgressive) {
             Write-Output "Progressive Stage: $SnoozeCount"
 
             # Stage 4: Trigger automatic reboot countdown
