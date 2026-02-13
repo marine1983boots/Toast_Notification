@@ -1,0 +1,1191 @@
+<#
+===========================================================================
+Created on:   22/07/2020 11:04
+Created by:   Ben Whitmore
+Filename:     Toast_Notify.ps1
+===========================================================================
+
+Version 2.2 - 12/02/2026
+-Added progressive snooze enforcement system with 5-stage escalation (0-4)
+-Added EnableProgressive parameter to enable opt-in progressive mode
+-Added registry-based state management for snooze persistence
+-Added Priority property support for Focus Assist bypass (Win10 15063+)
+-Added ForceDisplay composite switch for maximum visibility
+-Added ConvertTo-XmlSafeString function to prevent XML injection attacks
+-Added support for stage-specific EventText in XML (Stage0-4 nodes)
+-Maintained full backwards compatibility (EnableProgressive defaults to $false)
+-Helper functions: Initialize-ToastRegistry, Get-ToastState, Set-ToastState, Get-StageDetails, Get-StageEventText
+
+Version 2.1 - 11/02/2026
+-Added -ToastScenario parameter to control toast notification priority and behavior
+-Supports alarm, urgent, reminder, and default scenarios
+-Scenario attribute dynamically applied to toast XML
+-Parameter properly passed through scheduled task
+-Added [CmdletBinding()] for proper PowerShell behavior support
+-Added defensive parameter validation for ToastScenario
+
+Version 2.0 - 07/02/2021
+-Basic logging added
+-Toast temp directory fixed to $ENV:\Temp\$ToastGUID
+-Removed unncessary User SID discovery as its no longer needed when running the Scheduled Task as "USERS"
+-Complete re-write for obtaining Toast Displayname. Name obtained first for Domain User, then AzureAD User from the IdentityStore Logon Cache and finally whoami.exe
+- Added "AllowStartIfOnBatteries" parameter to Scheduled Task
+
+Version 1.2.105 - 05/002/2021
+-Changed how we grab the Toast Welcome Name for the Logged on user by leveraging whoami.exe - Thanks Erik Nilsson @dakire
+
+Version 1.2.28 - 28/01/2021
+-For AzureAD Joined computers we now try and grab a name to display in the Toast by getting the owner of the process Explorer.exe
+-Better error handling when Get-xx fails
+
+Version 1.2.26 - 26/01/2021
+-Changed the Scheduled Task to run as -GroupId "S-1-5-32-545" (USERS). 
+When Toast_Notify.ps1 is deployed as SYSTEM, the scheduled task will be created to run in the context of the Group "Users".
+This means the Toast will pop for the logged on user even if the username was unobtainable (During testing AzureAD Joined Computers did not populate (Win32_ComputerSystem).Username).
+The Toast will also be staged in the $ENV:Windir "Temp\$($ToastGuid)" folder if the logged on user information could not be found.
+Thanks @CodyMathis123 for the inspiration via https://github.com/CodyMathis123/CM-Ramblings/blob/master/New-PostTeamsMachineWideInstallScheduledTask.ps1
+
+
+Version 1.2.14 - 14/01/21
+-Fixed logic to return logged on DisplayName - Thanks @MMelkersen
+-Changed the way we retrieve the SID for the current user variable $LoggedOnUserSID
+-Added Event Title, Description and Source Path to the Scheduled Task that is created to pop the User Toast
+-Fixed an issue where Snooze was not being passed from the Scheduled Task
+-Fixed an issue with XMLSource full path not being returned correctly from Scheduled Task
+
+Version 1.2.10 - 10/01/21
+-Removed XMLOtherSource Parameter
+-Cleaned up XML formatting which removed unnecessary duplication when the Snooze parameter was passed. Action ChildNodes are now appended to ToastTemplate XML.
+
+Version 1.2 - 09/01/21
+-Added logic so if the script is deployed as SYSTEM it will create a scheduled task to run the script for the current logged on user.
+
+-Special Thanks to: -
+-Inspiration for creating a Scheduled Task for Toasts @PaulWetter https://wetterssource.com/ondemandtoast
+-Inspiration for running Toasts in User Context @syst_and_deploy http://www.systanddeploy.com/2020/11/display-simple-toast-notification-for.html
+-Inspiration for creating scheduled tasks for the logged on user @ccmexec via Community Hub in ConfigMgr https://github.com/Microsoft/configmgr-hub/commit/e4abdc0d3105afe026211805f13cf533c8de53c4
+
+Version 1.1 - 30/12/20
+-Added Snooze Switch option
+
+Version 1.0 - 22/07/20
+-Release
+
+.SYNOPSIS
+The purpose of the script is to create simple Toast Notifications in Windows 10
+
+.DESCRIPTION
+Toast_Notify.ps1 will read an XML file so Toast Notifications can be changed "on the fly" without having to repackage an application. The CustomMessage.xml file can be hosted on a fileshare.
+To create a custom XML, copy CustomMessage.xml and edit the text you want to disaply in the toast notification. The following files should be present in the Script Directory
+
+Toast_Notify.ps1
+BadgeImage.jpg
+HeroImage.jpg
+CustomMessage.xml
+
+.PARAMETER XMLSource
+Specify the name of the XML file to read. The XML file must exist in the same directory as Toast_Notify.ps1. If no parameter is passed, it is assumed the XML file is called CustomMessage.xml.
+
+.PARAMETER Snooze
+Add a snooze option to the Toast
+
+.PARAMETER ToastScenario
+Specify the toast notification scenario type. Valid values:
+- alarm: Highest priority, loops alarm audio, forces popup even with Focus Assist enabled (default)
+- urgent: High priority, bypasses Focus Assist, standard notification sound
+- reminder: Persistent reminder, can be suppressed by Focus Assist, stays in Action Center
+- default: Standard notification behavior
+
+.PARAMETER EnableProgressive
+Enable progressive snooze enforcement with 5-stage escalation (0-4).
+When enabled, each snooze increments a counter stored in registry.
+Stage progression: 0 (initial) -> 1 -> 2 -> 3 (urgent) -> 4 (alarm/non-dismissible)
+Default: $false (classic single-snooze behavior)
+
+.PARAMETER SnoozeCount
+Current snooze count (0-4). Automatically managed via registry in progressive mode.
+Only used when EnableProgressive is $true.
+
+.PARAMETER Priority
+Set toast notification priority to High for Focus Assist bypass attempts.
+Requires Windows 10 Build 15063 or later. Graceful fallback with warning if not supported.
+Default: $false
+
+.PARAMETER ForceDisplay
+Composite switch that enables maximum visibility for critical alerts.
+Combines: Priority=High + ToastScenario=alarm + ensures action buttons.
+Default: $false
+
+.EXAMPLE
+Toast_Notify.ps1 -XMLSource "PhoneSystemProblems.xml"
+
+.EXAMPLE
+Toast_Notify.ps1 -Snooze
+
+.EXAMPLE
+Toast_Notify.ps1 -ToastScenario "urgent"
+
+.EXAMPLE
+Toast_Notify.ps1 -XMLSource "Maintenance.xml" -ToastScenario "reminder" -Snooze
+
+.EXAMPLE
+Toast_Notify.ps1 -EnableProgressive -XMLSource "CustomMessage.xml"
+Enables progressive enforcement with stage-specific messages from XML
+
+.EXAMPLE
+Toast_Notify.ps1 -ForceDisplay -XMLSource "CriticalAlert.xml"
+Maximum visibility mode for critical notifications
+
+.EXAMPLE
+Toast_Notify.ps1 -EnableProgressive -SnoozeCount 2 -ToastGUID "ABC123"
+Displays Stage 2 toast (2 of 4 snoozes used) for specified GUID
+#>
+
+[CmdletBinding()]
+Param
+(
+    [Parameter(Mandatory = $False)]
+    [Switch]$Snooze,
+    [Parameter(Mandatory = $False)]
+    [ValidateSet('alarm', 'urgent', 'reminder', 'default')]
+    [String]$ToastScenario = 'alarm',
+    [Parameter(Mandatory = $False)]
+    [String]$XMLSource = "CustomMessage.xml",
+    [Parameter(Mandatory = $False)]
+    [ValidatePattern('^[A-F0-9\-]{1,36}$')]
+    [String]$ToastGUID,
+    [Parameter(Mandatory = $False)]
+    [Switch]$EnableProgressive,
+    [Parameter(Mandatory = $False)]
+    [ValidateRange(0, 4)]
+    [Int]$SnoozeCount = 0,
+    [Parameter(Mandatory = $False)]
+    [Switch]$Priority,
+    [Parameter(Mandatory = $False)]
+    [Switch]$ForceDisplay,
+    [Parameter(Mandatory = $False)]
+    [Switch]$TestMode,
+    [Parameter(Mandatory = $False)]
+    [ValidateRange(1, 1440)]
+    [Int]$RebootCountdownMinutes = 5
+)
+
+#region Helper Functions
+
+function ConvertTo-XmlSafeString {
+    <#
+    .SYNOPSIS
+        Encodes a string for safe embedding in XML
+    .DESCRIPTION
+        Prevents XML injection attacks by encoding special characters:
+        & -> &amp;, < -> &lt;, > -> &gt;, " -> &quot;, ' -> &apos;
+
+        CRITICAL: This function MUST be called on all user-provided or
+        dynamic text before embedding in toast XML. Skipping this encoding
+        creates XML injection vulnerabilities.
+    .PARAMETER InputString
+        The string to encode. Can be null or empty.
+    .EXAMPLE
+        ConvertTo-XmlSafeString -InputString "AT&T <Critical> Update"
+        Returns: "AT&amp;T &lt;Critical&gt; Update"
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [AllowNull()]
+        [String]$InputString
+    )
+
+    if ([string]::IsNullOrEmpty($InputString)) {
+        return ""
+    }
+
+    # Replace XML special characters with their entity equivalents
+    $InputString = $InputString.Replace("&", "&amp;")
+    $InputString = $InputString.Replace("<", "&lt;")
+    $InputString = $InputString.Replace(">", "&gt;")
+    $InputString = $InputString.Replace('"', "&quot;")
+    $InputString = $InputString.Replace("'", "&apos;")
+
+    return $InputString
+}
+
+function Initialize-ToastRegistry {
+    <#
+    .SYNOPSIS
+        Creates registry structure for toast state persistence
+    .PARAMETER ToastGUID
+        Unique identifier for this toast instance
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^[A-F0-9\-]{1,36}$')]
+        [String]$ToastGUID
+    )
+
+    $RegPath = "HKLM:\SOFTWARE\ToastNotification\$ToastGUID"
+
+    try {
+        # Create base path if not exists
+        if (!(Test-Path "HKLM:\SOFTWARE\ToastNotification")) {
+            New-Item -Path "HKLM:\SOFTWARE" -Name "ToastNotification" -Force | Out-Null
+        }
+
+        # Create toast-specific path
+        if (!(Test-Path $RegPath)) {
+            New-Item -Path "HKLM:\SOFTWARE\ToastNotification" -Name $ToastGUID -Force | Out-Null
+            Write-Verbose "Registry path created: $RegPath"
+        }
+
+        # Initialize properties with write verification
+        Set-ItemProperty -Path $RegPath -Name "SnoozeCount" -Value 0 -Type DWord -Force
+        Set-ItemProperty -Path $RegPath -Name "FirstShown" -Value (Get-Date).ToString('s') -Type String -Force
+        Set-ItemProperty -Path $RegPath -Name "LastShown" -Value (Get-Date).ToString('s') -Type String -Force
+        Set-ItemProperty -Path $RegPath -Name "LastSnoozeInterval" -Value "" -Type String -Force
+
+        # Verify registry writes were successful
+        $Verify = Get-ItemProperty -Path $RegPath -ErrorAction Stop
+        if ($Verify.SnoozeCount -ne 0) {
+            throw "Registry write verification failed - SnoozeCount not set correctly"
+        }
+        if ([string]::IsNullOrEmpty($Verify.FirstShown)) {
+            throw "Registry write verification failed - FirstShown not set"
+        }
+
+        Write-Verbose "Registry initialized and verified: SnoozeCount=0, FirstShown=$(Get-Date -Format 's')"
+        return $true
+    }
+    catch {
+        Write-Warning "Failed to initialize registry: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Get-ToastState {
+    <#
+    .SYNOPSIS
+        Reads current toast state from registry
+    .PARAMETER ToastGUID
+        Unique identifier for this toast instance
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^[A-F0-9\-]{1,36}$')]
+        [String]$ToastGUID
+    )
+
+    $RegPath = "HKLM:\SOFTWARE\ToastNotification\$ToastGUID"
+
+    try {
+        if (Test-Path $RegPath) {
+            $State = Get-ItemProperty -Path $RegPath -ErrorAction Stop
+            Write-Verbose "Registry state retrieved: SnoozeCount=$($State.SnoozeCount)"
+            return $State
+        }
+        else {
+            Write-Warning "Registry path not found: $RegPath"
+            return $null
+        }
+    }
+    catch {
+        Write-Warning "Failed to read registry state: $($_.Exception.Message)"
+        return $null
+    }
+}
+
+function Set-ToastState {
+    <#
+    .SYNOPSIS
+        Updates toast state in registry
+    .PARAMETER ToastGUID
+        Unique identifier for this toast instance
+    .PARAMETER SnoozeCount
+        Current snooze count
+    .PARAMETER LastInterval
+        Last selected snooze interval
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^[A-F0-9\-]{1,36}$')]
+        [String]$ToastGUID,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(0, 4)]
+        [Int]$SnoozeCount,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateSet("", "15m", "30m", "1h", "2h", "4h", "eod")]
+        [String]$LastInterval = ""
+    )
+
+    $RegPath = "HKLM:\SOFTWARE\ToastNotification\$ToastGUID"
+
+    try {
+        Set-ItemProperty -Path $RegPath -Name "SnoozeCount" -Value $SnoozeCount -Type DWord
+        Set-ItemProperty -Path $RegPath -Name "LastShown" -Value (Get-Date).ToString('s') -Type String
+        if ($LastInterval) {
+            Set-ItemProperty -Path $RegPath -Name "LastSnoozeInterval" -Value $LastInterval -Type String
+        }
+
+        # Verify registry write succeeded
+        $Verify = Get-ItemProperty -Path $RegPath -ErrorAction Stop
+        if ($Verify.SnoozeCount -ne $SnoozeCount) {
+            throw "Registry write verification failed - SnoozeCount not updated correctly"
+        }
+
+        Write-Verbose "Registry state updated and verified: SnoozeCount=$SnoozeCount"
+        return $true
+    }
+    catch {
+        Write-Warning "Failed to update registry state: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Get-StageDetails {
+    <#
+    .SYNOPSIS
+        Gets stage configuration based on snooze count
+    .DESCRIPTION
+        Maps SnoozeCount (0-4) to stage-specific configuration including:
+        - Scenario type (reminder, urgent, alarm)
+        - Fixed snooze interval for that stage
+        - Audio loop settings
+        - Dismissal permissions
+        - Visual urgency level
+    .PARAMETER SnoozeCount
+        Current snooze count (0-4)
+    .EXAMPLE
+        Get-StageDetails -SnoozeCount 0
+        Returns Stage 0 configuration (initial reminder, 2h snooze)
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(0, 4)]
+        [Int]$SnoozeCount
+    )
+
+    $StageConfig = @{
+        Stage = $SnoozeCount
+        Scenario = "reminder"
+        SnoozeInterval = ""
+        AllowDismiss = $true
+        AudioLoop = $false
+        VisualUrgency = "Normal"
+    }
+
+    switch ($SnoozeCount) {
+        0 {
+            $StageConfig.Stage = 0
+            $StageConfig.Scenario = "alarm"
+            $StageConfig.SnoozeInterval = "2h"
+            $StageConfig.AllowDismiss = $true
+            $StageConfig.AudioLoop = $false
+            $StageConfig.VisualUrgency = "Normal"
+        }
+        1 {
+            $StageConfig.Stage = 1
+            $StageConfig.Scenario = "reminder"
+            $StageConfig.SnoozeInterval = "1h"
+            $StageConfig.AllowDismiss = $true
+            $StageConfig.AudioLoop = $false
+            $StageConfig.VisualUrgency = "Normal"
+        }
+        2 {
+            $StageConfig.Stage = 2
+            $StageConfig.Scenario = "reminder"
+            $StageConfig.SnoozeInterval = "30m"
+            $StageConfig.AllowDismiss = $true
+            $StageConfig.AudioLoop = $false
+            $StageConfig.VisualUrgency = "Normal"
+        }
+        3 {
+            $StageConfig.Stage = 3
+            $StageConfig.Scenario = "urgent"
+            $StageConfig.SnoozeInterval = "15m"
+            $StageConfig.AllowDismiss = $true
+            $StageConfig.AudioLoop = $true
+            $StageConfig.VisualUrgency = "Urgent"
+        }
+        4 {
+            $StageConfig.Stage = 4
+            $StageConfig.Scenario = "alarm"
+            $StageConfig.SnoozeInterval = ""  # No snooze at Stage 4
+            $StageConfig.AllowDismiss = $false
+            $StageConfig.AudioLoop = $true
+            $StageConfig.VisualUrgency = "Critical"
+        }
+        default {
+            # Fallback to Stage 0
+            $StageConfig.Stage = 0
+            $StageConfig.Scenario = "reminder"
+            $StageConfig.SnoozeInterval = "2h"
+            $StageConfig.AllowDismiss = $true
+            $StageConfig.AudioLoop = $false
+            $StageConfig.VisualUrgency = "Normal"
+        }
+    }
+
+    Write-Verbose "Stage $SnoozeCount configuration: Scenario=$($StageConfig.Scenario), SnoozeInterval=$($StageConfig.SnoozeInterval), Dismissable=$($StageConfig.AllowDismiss)"
+    return $StageConfig
+}
+
+function Get-StageEventText {
+    <#
+    .SYNOPSIS
+        Extracts stage-specific text from XML EventText node
+    .DESCRIPTION
+        Supports two XML schemas:
+        - New schema: EventText with Stage0-4 child nodes
+        - Old schema: EventText with single text value (backward compatible)
+    .PARAMETER XmlDocument
+        XML document containing ToastContent
+    .PARAMETER StageNumber
+        Current stage number (0-4 based on SnoozeCount)
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false)]
+        [System.Xml.XmlDocument]$XmlDocument,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(0, 4)]
+        [int]$StageNumber
+    )
+
+    if ($null -eq $XmlDocument) { return $null }
+
+    $EventTextNode = $XmlDocument.ToastContent.EventText
+    if ($null -eq $EventTextNode) { return $null }
+
+    # Check if stage-specific nodes exist (new schema)
+    if ($EventTextNode.ChildNodes.Count -gt 0 -and $EventTextNode.SelectSingleNode("Stage0")) {
+        # New schema: Select stage based on StageNumber
+        $StageNode = $EventTextNode.SelectSingleNode("Stage$StageNumber")
+        if ($StageNode) {
+            Write-Verbose "Using Stage$StageNumber text from XML"
+            return $StageNode.InnerText.Trim()
+        }
+        else {
+            # Fallback to Stage0 if specific stage node missing
+            Write-Verbose "Stage$StageNumber not found, using Stage0 text from XML"
+            return $EventTextNode.Stage0.InnerText.Trim()
+        }
+    }
+    else {
+        # Old schema: Single EventText value (backward compatible)
+        Write-Verbose "Using simple EventText from XML (backward compatible)"
+        return [string]$EventTextNode
+    }
+}
+
+function Register-ToastAppId {
+    <#
+    .SYNOPSIS
+        Registers a custom AppUserModelId for toast notifications
+    .DESCRIPTION
+        Based on BurntToast module approach - registers AppId in HKCU registry
+        to ensure toasts display properly in Windows 10/11
+    .PARAMETER AppId
+        The AppUserModelId to register
+    .PARAMETER DisplayName
+        Display name shown in Windows notification settings
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [String]$AppId,
+
+        [Parameter(Mandatory = $false)]
+        [String]$DisplayName = "Toast Notification"
+    )
+
+    try {
+        $RegPath = "HKCU:\Software\Classes\AppUserModelId\$AppId"
+
+        if (-not (Test-Path $RegPath)) {
+            Write-Verbose "Registering AppUserModelId: $AppId"
+            New-Item -Path $RegPath -Force | Out-Null
+            Set-ItemProperty -Path $RegPath -Name "DisplayName" -Value $DisplayName -Type String
+            Write-Verbose "AppUserModelId registered successfully"
+            return $true
+        }
+        else {
+            Write-Verbose "AppUserModelId already registered: $AppId"
+            return $true
+        }
+    }
+    catch {
+        Write-Warning "Failed to register AppUserModelId: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+#endregion Helper Functions
+
+#Set Unique GUID for the Toast
+If (!($ToastGUID)) {
+    $ToastGUID = ([guid]::NewGuid()).ToString().ToUpper()
+}
+
+#Handle ForceDisplay composite switch
+If ($ForceDisplay) {
+    Write-Verbose "ForceDisplay enabled - setting Priority=High and ToastScenario=alarm"
+    $Priority = $true
+    $ToastScenario = 'alarm'
+    Write-Warning "ForceDisplay cannot guarantee Focus Assist bypass on all systems"
+}
+
+#Validate progressive mode parameters
+If ($EnableProgressive) {
+    Write-Verbose "Progressive mode enabled - validating SnoozeCount parameter"
+    if ($SnoozeCount -lt 0 -or $SnoozeCount -gt 4) {
+        throw "SnoozeCount must be between 0 and 4 when EnableProgressive is enabled"
+    }
+}
+
+#Current Directory
+$ScriptPath = $MyInvocation.MyCommand.Path
+$CurrentDir = Split-Path $ScriptPath
+
+#Set Toast Path to UserProfile Temp Directory
+$ToastPath = (Join-Path $ENV:Windir "Temp\$($ToastGuid)")
+
+#Validate ToastScenario parameter (defensive check)
+if ($ToastScenario -notin @('alarm', 'urgent', 'reminder', 'default')) {
+    Write-Warning "Invalid ToastScenario value: $ToastScenario. Defaulting to 'alarm'"
+    $ToastScenario = 'alarm'
+}
+
+#Test if XML exists
+if (!(Test-Path (Join-Path $CurrentDir $XMLSource))) {
+    throw "$XMLSource is invalid."
+}
+
+#Check XML is valid
+$XMLToast = New-Object System.Xml.XmlDocument
+try {
+    $XMLToast.Load((Get-ChildItem -Path (Join-Path $CurrentDir $XMLSource)).FullName)
+    $XMLValid = $True
+}
+catch [System.Xml.XmlException] {
+    Write-Verbose "$XMLSource : $($_.toString())"
+    $XMLValid = $False
+}
+
+#Continue if XML is valid
+If ($XMLValid -eq $True) {
+
+    #Create Toast Variables
+    $ToastTitle = [string]$XMLToast.ToastContent.ToastTitle
+    $Signature = [string]$XMLToast.ToastContent.Signature
+    $EventTitle = [string]$XMLToast.ToastContent.EventTitle
+    $EventText = [string]$XMLToast.ToastContent.EventText
+    $ButtonTitle = [string]$XMLToast.ToastContent.ButtonTitle
+    $ButtonAction = [string]$XMLToast.ToastContent.ButtonAction
+    $SnoozeTitle = [string]$XMLToast.ToastContent.SnoozeTitle
+    $RebootTitle = [string]$XMLToast.ToastContent.RebootTitle
+
+    #ToastDuration: Short = 7s, Long = 25s
+    $ToastDuration = "long"
+
+    #Images
+    $BadgeImage = "file:///$CurrentDir/badgeimage.jpg"
+    $HeroImage = "file:///$CurrentDir/heroimage.jpg"
+
+    #Set COM App ID for toast notifications
+    # Use custom AppId following BurntToast approach for reliability
+    $LauncherID = "ToastNotification.PowerShell.{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}"
+
+    #Dont Create a Scheduled Task if the script is running in the context of the logged on user, only if SYSTEM fired the script i.e. Deployment from Intune/ConfigMgr
+    If (([System.Security.Principal.WindowsIdentity]::GetCurrent()).Name -eq "NT AUTHORITY\SYSTEM") {
+
+        Write-Output "Running in SYSTEM context - Initializing deployment..."
+
+        #Initialize Registry State if progressive mode enabled
+        If ($EnableProgressive) {
+            Write-Output "Initializing registry for ToastGUID: $ToastGUID"
+            $RegInitResult = Initialize-ToastRegistry -ToastGUID $ToastGUID
+            if (!$RegInitResult) {
+                Write-Error "CRITICAL: Registry initialization failed"
+                Write-Error "Toast state will not persist across snoozes"
+                throw "Registry initialization failure - cannot deploy toast notification"
+            }
+
+            # Verify registry was created and readable
+            $RegVerify = Get-ToastState -ToastGUID $ToastGUID
+            if (!$RegVerify) {
+                Write-Error "CRITICAL: Registry created but not readable"
+                throw "Registry verification failed"
+            }
+
+            Write-Output "Registry initialization verified: SnoozeCount=$($RegVerify.SnoozeCount)"
+
+            # Register toast-snooze:// protocol handler in HKEY_CLASSES_ROOT
+            Write-Output "Registering toast-snooze:// protocol handler..."
+            try {
+                # Check if running with sufficient permissions (SYSTEM should have access)
+                $ProtocolKey = "Registry::HKEY_CLASSES_ROOT\toast-snooze"
+
+                # Create protocol key
+                if (!(Test-Path $ProtocolKey)) {
+                    New-Item -Path "Registry::HKEY_CLASSES_ROOT" -Name "toast-snooze" -Force | Out-Null
+                }
+
+                Set-ItemProperty -Path $ProtocolKey -Name "(Default)" -Value "URL:Toast Snooze Protocol" -Force
+                Set-ItemProperty -Path $ProtocolKey -Name "URL Protocol" -Value "" -Force
+
+                # Create shell\open\command structure
+                $CommandKey = "$ProtocolKey\shell\open\command"
+                if (!(Test-Path "$ProtocolKey\shell")) {
+                    New-Item -Path $ProtocolKey -Name "shell" -Force | Out-Null
+                }
+                if (!(Test-Path "$ProtocolKey\shell\open")) {
+                    New-Item -Path "$ProtocolKey\shell" -Name "open" -Force | Out-Null
+                }
+                if (!(Test-Path $CommandKey)) {
+                    New-Item -Path "$ProtocolKey\shell\open" -Name "command" -Force | Out-Null
+                }
+
+                # The handler script will be staged, so reference the staged path
+                # Note: We'll update this after staging files
+                # For now, create placeholder - will be updated after file staging
+
+                Write-Output "Protocol handler registration completed"
+            }
+            catch {
+                Write-Warning "Failed to register protocol handler: $($_.Exception.Message)"
+                Write-Warning "Progressive snooze buttons may not function correctly"
+            }
+        }
+
+        #Prepare to stage Toast Notification Content in %TEMP% Folder
+        Try {
+
+            #Create TEMP folder to stage Toast Notification Content in %TEMP% Folder
+            New-Item $ToastPath -ItemType Directory -Force -ErrorAction Continue | Out-Null
+
+            # Only copy toast-related files (not Claude workspace files or directories)
+            $FileExtensions = @('*.ps1', '*.jpg', '*.xml', '*.png', '*.txt')
+            $ToastFiles = Get-ChildItem -Path $CurrentDir -File | Where-Object {
+                $Extension = "*$($_.Extension)"
+                $Extension -in $FileExtensions
+            }
+
+            Write-Output "Staging $($ToastFiles.Count) files to $ToastPath"
+
+            #Copy Toast Files to Toast TEMP folder
+            ForEach ($ToastFile in $ToastFiles) {
+                Copy-Item $ToastFile.FullName -Destination $ToastPath -ErrorAction Continue
+                Write-Output "  Staged: $($ToastFile.Name)"
+            }
+        }
+        Catch {
+            Write-Warning $_.Exception.Message
+        }
+
+        #Set new Toast script to run from TEMP path
+        $New_ToastPath = Join-Path $ToastPath "Toast_Notify.ps1"
+
+        # Update protocol handler command now that files are staged
+        If ($EnableProgressive) {
+            try {
+                $HandlerPath = Join-Path $ToastPath "Toast_Snooze_Handler.ps1"
+                $CommandKey = "Registry::HKEY_CLASSES_ROOT\toast-snooze\shell\open\command"
+
+                $CommandValue = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$HandlerPath`" -ProtocolUri `"%1`""
+                Set-ItemProperty -Path $CommandKey -Name "(Default)" -Value $CommandValue -Force
+
+                Write-Output "Protocol handler command registered: $CommandValue"
+
+                # Verify registration
+                $VerifyCommand = Get-ItemProperty -Path $CommandKey -ErrorAction Stop
+                if ($VerifyCommand.'(Default)' -eq $CommandValue) {
+                    Write-Output "Protocol registration verified successfully"
+                }
+                else {
+                    Write-Warning "Protocol registration verification failed"
+                }
+
+                # Register toast-reboot:// protocol handler (for Stage 4 "Reboot Now" button)
+                Write-Output "Registering toast-reboot:// protocol handler..."
+                $RebootProtocolKey = "Registry::HKEY_CLASSES_ROOT\toast-reboot"
+
+                # Create protocol key
+                if (!(Test-Path $RebootProtocolKey)) {
+                    New-Item -Path "Registry::HKEY_CLASSES_ROOT" -Name "toast-reboot" -Force | Out-Null
+                }
+
+                Set-ItemProperty -Path $RebootProtocolKey -Name "(Default)" -Value "URL:Toast Reboot Protocol" -Force
+                Set-ItemProperty -Path $RebootProtocolKey -Name "URL Protocol" -Value "" -Force
+
+                # Create shell\open\command structure
+                $RebootCommandKey = "$RebootProtocolKey\shell\open\command"
+                if (!(Test-Path "$RebootProtocolKey\shell")) {
+                    New-Item -Path $RebootProtocolKey -Name "shell" -Force | Out-Null
+                }
+                if (!(Test-Path "$RebootProtocolKey\shell\open")) {
+                    New-Item -Path "$RebootProtocolKey\shell" -Name "open" -Force | Out-Null
+                }
+                if (!(Test-Path $RebootCommandKey)) {
+                    New-Item -Path "$RebootProtocolKey\shell\open" -Name "command" -Force | Out-Null
+                }
+
+                # Set command to Toast_Reboot_Handler.ps1
+                $RebootHandlerPath = Join-Path $ToastPath "Toast_Reboot_Handler.ps1"
+                $RebootCommandValue = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$RebootHandlerPath`" -ProtocolUri `"%1`""
+                Set-ItemProperty -Path $RebootCommandKey -Name "(Default)" -Value $RebootCommandValue -Force
+
+                Write-Output "toast-reboot:// protocol registered: $RebootCommandValue"
+            }
+            catch {
+                Write-Warning "Failed to update protocol handler command: $($_.Exception.Message)"
+            }
+        }
+
+        #Created Scheduled Task to run as Logged on User
+        $Task_TimeToRun = (Get-Date).AddSeconds(30).ToString('s')
+        $Task_Expiry = (Get-Date).AddSeconds(120).ToString('s')
+
+        #Build arguments string with optional parameters
+        $TaskArguments = "-NoProfile -WindowStyle Hidden -File ""$New_ToastPath"" -ToastGUID ""$ToastGUID"" -XMLSource ""$XMLSource"" -ToastScenario ""$ToastScenario"""
+        If ($Snooze) {
+            $TaskArguments += " -Snooze"
+        }
+        If ($EnableProgressive) {
+            $TaskArguments += " -EnableProgressive -SnoozeCount 0"
+        }
+        If ($Priority) {
+            $TaskArguments += " -Priority"
+        }
+        If ($ForceDisplay) {
+            $TaskArguments += " -ForceDisplay"
+        }
+        $Task_Action = New-ScheduledTaskAction -Execute "C:\WINDOWS\system32\WindowsPowerShell\v1.0\PowerShell.exe" -Argument $TaskArguments
+        $Task_Trigger = New-ScheduledTaskTrigger -Once -At $Task_TimeToRun
+        $Task_Trigger.EndBoundary = $Task_Expiry
+        $Task_Principal = New-ScheduledTaskPrincipal -GroupId "S-1-5-32-545" -RunLevel Limited
+        $Task_Settings = New-ScheduledTaskSettingsSet -Compatibility V1 -DeleteExpiredTaskAfter (New-TimeSpan -Seconds 600) -AllowStartIfOnBatteries
+        $New_Task = New-ScheduledTask -Description "Toast_Notification_$($ToastGuid) Task for user notification. Title: $($EventTitle) :: Event:$($EventText) :: Source Path: $($ToastPath) " -Action $Task_Action -Principal $Task_Principal -Trigger $Task_Trigger -Settings $Task_Settings
+        Register-ScheduledTask -TaskName "Toast_Notification_$($ToastGuid)" -InputObject $New_Task
+    }
+
+    #Run the toast of the script is running in the context of the Logged On User
+    If (!(([System.Security.Principal.WindowsIdentity]::GetCurrent()).Name -eq "NT AUTHORITY\SYSTEM")) {
+
+        $Log = (Join-Path $ENV:Windir "Temp\$($ToastGuid).log")
+        Start-Transcript $Log
+
+        Write-Output "========================================="
+        Write-Output "Toast Notification - User Context Execution"
+        Write-Output "ToastGUID: $ToastGUID"
+        Write-Output "EnableProgressive: $EnableProgressive"
+        Write-Output "SnoozeCount Parameter: $SnoozeCount"
+        Write-Output "Priority: $Priority"
+        Write-Output "ForceDisplay: $ForceDisplay"
+        Write-Output "Timestamp: $(Get-Date -Format 's')"
+        Write-Output "========================================="
+
+        #Handle progressive mode - read authoritative SnoozeCount from registry
+        If ($EnableProgressive) {
+            $RegState = Get-ToastState -ToastGUID $ToastGUID
+            if ($RegState) {
+                $RegistrySnoozeCount = $RegState.SnoozeCount
+                Write-Output "Registry SnoozeCount: $RegistrySnoozeCount"
+                Write-Output "Parameter SnoozeCount: $SnoozeCount"
+
+                # CRITICAL: Validate registry matches parameter (detect desynchronization)
+                if ($RegistrySnoozeCount -ne $SnoozeCount) {
+                    Write-Warning "Registry/parameter mismatch detected!"
+                    Write-Warning "  Registry: $RegistrySnoozeCount"
+                    Write-Warning "  Parameter: $SnoozeCount"
+
+                    if ($TestMode) {
+                        Write-Warning "[TEST MODE] Using parameter value instead of registry for testing"
+                    }
+                    else {
+                        Write-Warning "Using registry value as authoritative source"
+                        $SnoozeCount = $RegistrySnoozeCount
+                    }
+                }
+                else {
+                    $SnoozeCount = $RegistrySnoozeCount
+                }
+
+                Write-Output "Using SnoozeCount: $SnoozeCount (Source: $(if($TestMode){'Parameter (TestMode)'}else{'Registry'}))"
+            }
+            else {
+                Write-Warning "Registry state not found for ToastGUID: $ToastGUID"
+                Write-Warning "This may indicate first run or registry initialization failure"
+                Write-Warning "Using parameter value: $SnoozeCount"
+            }
+
+            # Early validation for SnoozeCount range
+            if ($SnoozeCount -lt 0 -or $SnoozeCount -gt 4) {
+                Write-Error "CRITICAL: Invalid SnoozeCount from registry: $SnoozeCount (valid: 0-4)"
+                Stop-Transcript
+                throw "Registry corruption detected - SnoozeCount out of valid range"
+            }
+        }
+
+        #Get logged on user DisplayName
+        #Try to get the DisplayName for Domain User
+        $ErrorActionPreference = "Continue"
+
+        Try {
+            Write-Output "Trying Identity LogonUI Registry Key for Domain User info..."
+            $User = Get-Itemproperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\LogonUI" -Name "LastLoggedOnDisplayName" -ErrorAction Stop | Select-Object -ExpandProperty LastLoggedOnDisplayName
+
+            If ($Null -eq $User) {
+                $Firstname = $Null
+            }
+            else {
+                $DisplayName = $User.Split(" ")
+                $Firstname = $DisplayName[0]
+            }
+        }
+        Catch [System.Management.Automation.PSArgumentException] {
+            "Registry Key Property missing" 
+            Write-Warning "Registry Key for LastLoggedOnDisplayName could not be found."
+            $Firstname = $Null
+        }
+        Catch [System.Management.Automation.ItemNotFoundException] {
+            "Registry Key itself is missing" 
+            Write-Warning "Registry value for LastLoggedOnDisplayName could not be found."
+            $Firstname = $Null
+        }
+
+        #Try to get the DisplayName for Azure AD User
+        If ($Null -eq $Firstname) {
+            Write-Output "Trying Identity Store Cache for Azure AD User info..."
+            Try {
+                $UserSID = (whoami /user /fo csv | ConvertFrom-Csv).Sid
+                $LogonCacheSID = (Get-ChildItem HKLM:\SOFTWARE\Microsoft\IdentityStore\LogonCache -Recurse -Depth 2 | Where-Object { $_.Name -match $UserSID }).Name
+                If ($LogonCacheSID) { 
+                    $LogonCacheSID = $LogonCacheSID.Replace("HKEY_LOCAL_MACHINE", "HKLM:") 
+                    $User = Get-ItemProperty -Path $LogonCacheSID | Select-Object -ExpandProperty DisplayName -ErrorAction Stop
+                    $DisplayName = $User.Split(" ")
+                    $Firstname = $DisplayName[0]
+                }
+                else {
+                    Write-Warning "Could not get DisplayName property from Identity Store Cache for Azure AD User"
+                    $Firstname = $Null
+                }
+            }
+            Catch [System.Management.Automation.PSArgumentException] {
+                Write-Warning "Could not get DisplayName property from Identity Store Cache for Azure AD User"
+                Write-Output "Resorting to whoami info for Toast DisplayName..."
+                $Firstname = $Null
+            }
+            Catch [System.Management.Automation.ItemNotFoundException] {
+                Write-Warning "Could not get SID from Identity Store Cache for Azure AD User"
+                Write-Output "Resorting to whoami info for Toast DisplayName..."
+                $Firstname = $Null
+            }
+            Catch {
+                Write-Warning "Could not get SID from Identity Store Cache for Azure AD User"
+                Write-Output "Resorting to whoami info for Toast DisplayName..."
+                $Firstname = $Null  
+            }
+        }
+
+        #Try to get the DisplayName from whoami
+        If ($Null -eq $Firstname) {
+            Try {
+                Write-Output "Trying Identity whoami.exe for DisplayName info..."
+                $User = whoami.exe
+                $Firstname = (Get-Culture).textinfo.totitlecase($User.Split("\")[1])
+                Write-Output "DisplayName retrieved from whoami.exe"
+            }
+            Catch {
+                Write-Warning "Could not get DisplayName from whoami.exe"
+            }
+        }
+
+        #If DisplayName could not be obtained, leave it blank
+        If ($Null -eq $Firstname) {
+            Write-Output "DisplayName could not be obtained, it will be blank in the Toast"
+        }
+                   
+        #Get Hour of Day and set Custom Hello
+        $Hour = (Get-Date).Hour
+        If ($Hour -lt 12) { $CustomHello = "Good Morning $($Firstname)" }
+        ElseIf ($Hour -gt 16) { $CustomHello = "Good Evening $($Firstname)" }
+        Else { $CustomHello = "Good Afternoon $($Firstname)" }
+
+        #Load Assemblies
+        [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
+        [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
+
+        #Get stage configuration if progressive mode enabled
+        If ($EnableProgressive) {
+            $StageConfig = Get-StageDetails -SnoozeCount $SnoozeCount
+            Write-Output "Toast Stage: $($StageConfig.Stage) ($($StageConfig.VisualUrgency))"
+            Write-Output "Scenario: $($StageConfig.Scenario)"
+            Write-Output "Snooze Interval: $($StageConfig.SnoozeInterval)"
+            Write-Output "Dismissable: $($StageConfig.AllowDismiss)"
+
+            # Override ToastScenario with stage-specific scenario (unless ForceDisplay set)
+            if (!$ForceDisplay) {
+                $ToastScenario = $StageConfig.Scenario
+                Write-Output "Using stage-specific scenario: $ToastScenario"
+            }
+
+            # Extract stage-specific EventText from XML
+            $EventText = Get-StageEventText -XmlDocument $XMLToast -StageNumber $SnoozeCount
+            if ([string]::IsNullOrWhiteSpace($EventText)) {
+                Write-Verbose "Using default EventText (no stage-specific text in XML)"
+                # EventText already loaded from XML or will use hardcoded default
+            }
+            else {
+                Write-Verbose "Using stage-specific EventText from XML"
+            }
+
+            # Build stage attribution text
+            $StageAttribution = ""
+            switch ($SnoozeCount) {
+                0 { $StageAttribution = "$Signature | Snoozed: 0 of 4" }
+                1 { $StageAttribution = "$Signature | Snoozed: 1 of 4" }
+                2 { $StageAttribution = "$Signature | Snoozed: 2 of 4" }
+                3 { $StageAttribution = "$Signature | Final Snooze: 3 of 4" }
+                4 { $StageAttribution = "$Signature | Snooze Limit Reached (4/4)" }
+            }
+            $Signature = $StageAttribution
+
+            # Stage 4 validation assertions
+            if ($StageConfig.Stage -eq 4) {
+                if (![string]::IsNullOrEmpty($StageConfig.SnoozeInterval)) {
+                    throw "CRITICAL ERROR: Stage 4 must have no snooze interval (found '$($StageConfig.SnoozeInterval)')"
+                }
+                if ($StageConfig.AllowDismiss -eq $true) {
+                    throw "CRITICAL ERROR: Stage 4 must not allow dismiss (AllowDismiss=$($StageConfig.AllowDismiss))"
+                }
+                if ($StageConfig.Scenario -ne 'alarm') {
+                    throw "CRITICAL ERROR: Stage 4 must use 'alarm' scenario (found '$($StageConfig.Scenario)')"
+                }
+                Write-Output "Stage 4 validation passed: No snooze, no dismiss, alarm scenario"
+            }
+        }
+
+        #Build toast scenario attribute (omit for default behavior)
+        If ($ToastScenario -eq 'default') {
+            $ScenarioAttribute = ''
+        }
+        else {
+            $ScenarioAttribute = "scenario=`"$ToastScenario`""
+        }
+
+        # XML-encode all text variables for safe embedding
+        $CustomHello_Safe = ConvertTo-XmlSafeString $CustomHello
+        $ToastTitle_Safe = ConvertTo-XmlSafeString $ToastTitle
+        $Signature_Safe = ConvertTo-XmlSafeString $Signature
+        $EventTitle_Safe = ConvertTo-XmlSafeString $EventTitle
+        $EventText_Safe = ConvertTo-XmlSafeString $EventText
+
+        # Determine audio based on stage (if progressive) or default
+        $AudioSrc = "ms-winsoundevent:notification.default"
+        $AudioLoop = ""
+        If ($EnableProgressive -and $StageConfig.AudioLoop) {
+            $AudioSrc = "ms-winsoundevent:notification.looping.alarm"
+            $AudioLoop = 'loop="true"'
+            Write-Output "Using looping alarm audio for Stage $($StageConfig.Stage)"
+        }
+
+        #Build XML ToastTemplate
+        [xml]$ToastTemplate = @"
+<toast duration="$ToastDuration" $ScenarioAttribute>
+    <visual>
+        <binding template="ToastGeneric">
+            <text>$CustomHello_Safe</text>
+            <text>$ToastTitle_Safe</text>
+            <text placement="attribution">$Signature_Safe</text>
+            <image placement="hero" src="$HeroImage"/>
+            <image placement="appLogoOverride" hint-crop="circle" src="$BadgeImage"/>
+            <group>
+                <subgroup>
+                    <text hint-style="title" hint-wrap="true">$EventTitle_Safe</text>
+                </subgroup>
+            </group>
+            <group>
+                <subgroup>
+                    <text hint-style="body" hint-wrap="true">$EventText_Safe</text>
+                </subgroup>
+            </group>
+        </binding>
+    </visual>
+    <audio src="$AudioSrc" $AudioLoop/>
+</toast>
+"@
+
+        #Build action buttons based on mode (Classic vs Progressive)
+        If ($EnableProgressive) {
+            # Progressive mode: Build stage-specific actions
+            Write-Output "Building progressive mode actions for Stage $SnoozeCount"
+
+            # XML-encode button titles
+            $ButtonTitle_Safe = ConvertTo-XmlSafeString $ButtonTitle
+            $ButtonAction_Safe = ConvertTo-XmlSafeString $ButtonAction
+            $SnoozeTitle_Safe = ConvertTo-XmlSafeString $SnoozeTitle
+            $RebootTitle_Safe = ConvertTo-XmlSafeString $RebootTitle
+
+            # Build actions dynamically based on stage
+            $ActionsXML = "<toast><actions>"
+
+            # Add snooze button for Stages 0-3
+            if ($StageConfig.Stage -lt 4) {
+                $SnoozeInterval = $StageConfig.SnoozeInterval
+                $SnoozeLabel = ""
+                switch ($SnoozeInterval) {
+                    "2h" { $SnoozeLabel = "$SnoozeTitle_Safe (2 hours)" }
+                    "1h" { $SnoozeLabel = "$SnoozeTitle_Safe (1 hour)" }
+                    "30m" { $SnoozeLabel = "$SnoozeTitle_Safe (30 minutes)" }
+                    "15m" { $SnoozeLabel = "$SnoozeTitle_Safe (15 minutes)" }
+                }
+
+                # Build toast-snooze:// protocol URI
+                $SnoozeProtocolUri = "toast-snooze://$ToastGUID/$SnoozeInterval"
+                Write-Output "Adding snooze button: $SnoozeLabel (Protocol: $SnoozeProtocolUri)"
+                $ActionsXML += "<action arguments=`"$SnoozeProtocolUri`" content=`"$SnoozeLabel`" activationType=`"protocol`" />"
+            }
+
+            # Stage 4: Add "Reboot Now" button instead of generic action button
+            if ($StageConfig.Stage -eq 4) {
+                $RebootProtocolUri = "toast-reboot://$ToastGUID/immediate"
+                Write-Output "Adding reboot button: $RebootTitle_Safe (Protocol: $RebootProtocolUri)"
+                $ActionsXML += "<action arguments=`"$RebootProtocolUri`" content=`"$RebootTitle_Safe`" activationType=`"protocol`" />"
+            }
+            else {
+                # Stages 0-3: Add generic action button
+                Write-Output "Adding action button: $ButtonTitle_Safe"
+                $ActionsXML += "<action arguments=`"$ButtonAction_Safe`" content=`"$ButtonTitle_Safe`" activationType=`"protocol`" />"
+            }
+
+            # Add dismiss button for Stages 0-3 only (Stage 4 not dismissable)
+            if ($StageConfig.AllowDismiss) {
+                Write-Output "Adding dismiss button"
+                $ActionsXML += "<action arguments=`"dismiss`" content=`"Dismiss`" activationType=`"system`"/>"
+            }
+
+            $ActionsXML += "</actions></toast>"
+
+            [xml]$ActionTemplate = $ActionsXML
+            $Action_Node = $ActionTemplate.toast.actions
+        }
+        Else {
+            # Classic mode: Use original snooze dropdown or simple actions
+
+            # XML-encode button values
+            $ButtonTitle_Safe = ConvertTo-XmlSafeString $ButtonTitle
+            $ButtonAction_Safe = ConvertTo-XmlSafeString $ButtonAction
+            $SnoozeTitle_Safe = ConvertTo-XmlSafeString $SnoozeTitle
+
+            #Build XML ActionTemplateSnooze (Used when $Snooze is passed as a parameter)
+            [xml]$ActionTemplateSnooze = @"
+<toast>
+    <actions>
+        <input id="SnoozeTimer" type="selection" title="Select a Snooze Interval" defaultInput="1">
+            <selection id="1" content="1 Minute"/>
+            <selection id="30" content="30 Minutes"/>
+            <selection id="60" content="1 Hour"/>
+            <selection id="120" content="2 Hours"/>
+            <selection id="240" content="4 Hours"/>
+        </input>
+        <action activationType="system" arguments="snooze" hint-inputId="SnoozeTimer" content="$SnoozeTitle_Safe" id="test-snooze"/>
+        <action arguments="$ButtonAction_Safe" content="$ButtonTitle_Safe" activationType="protocol" />
+        <action arguments="dismiss" content="Dismiss" activationType="system"/>
+    </actions>
+</toast>
+"@
+
+            #Build XML ActionTemplate (Used when $Snooze is not passed as a parameter)
+            [xml]$ActionTemplate = @"
+<toast>
+    <actions>
+        <action arguments="$ButtonAction_Safe" content="$ButtonTitle_Safe" activationType="protocol" />
+        <action arguments="dismiss" content="Dismiss" activationType="system"/>
+    </actions>
+</toast>
+"@
+
+            #If the Snooze parameter was passed, add additional XML elements to Toast
+            If ($Snooze) {
+                #Define default and snooze actions to be added $ToastTemplate
+                $Action_Node = $ActionTemplateSnooze.toast.actions
+            }
+            else {
+                #Define default actions to be added $ToastTemplate
+                $Action_Node = $ActionTemplate.toast.actions
+            }
+        }
+
+        #Append actions to $ToastTemplate
+        [void]$ToastTemplate.toast.AppendChild($ToastTemplate.ImportNode($Action_Node, $true))
+        
+        #Prepare XML
+        $ToastXml = [Windows.Data.Xml.Dom.XmlDocument]::New()
+        $ToastXml.LoadXml($ToastTemplate.OuterXml)
+
+        #Prepare and Create Toast
+        $ToastMessage = [Windows.UI.Notifications.ToastNotification]::New($ToastXML)
+
+        # Set Priority property if requested (Windows 10 Build 15063+ required)
+        If ($Priority -or $ForceDisplay) {
+            try {
+                # Attempt to set Priority property (may not be supported on older builds)
+                $ToastMessage.Priority = [Windows.UI.Notifications.ToastNotificationPriority]::High
+                Write-Output "Toast Priority set to High"
+            }
+            catch {
+                Write-Warning "Failed to set Priority property - may not be supported on this Windows version"
+                Write-Warning "Priority property requires Windows 10 Build 15063 or later"
+                Write-Verbose "Error: $($_.Exception.Message)"
+            }
+        }
+
+        # Register AppUserModelId (based on BurntToast approach for reliable display)
+        Write-Output "Registering AppUserModelId for toast display..."
+        $AppIdRegistered = Register-ToastAppId -AppId $LauncherID -DisplayName "Toast Notification System"
+
+        if (-not $AppIdRegistered) {
+            Write-Warning "AppId registration failed - toast may not display correctly"
+        }
+
+        # Display toast
+        Write-Output "Displaying toast notification..."
+        [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($LauncherID).Show($ToastMessage)
+
+        Write-Output "Toast displayed successfully"
+        If ($EnableProgressive) {
+            Write-Output "Progressive Stage: $SnoozeCount"
+
+            # Stage 4: Trigger automatic reboot countdown
+            If ($SnoozeCount -eq 4 -and !$TestMode) {
+                Write-Output "========================================" -ForegroundColor Red
+                Write-Output "[STAGE 4] INITIATING REBOOT COUNTDOWN" -ForegroundColor Red
+                Write-Output "========================================" -ForegroundColor Red
+                Write-Output "Reboot will occur in $RebootCountdownMinutes minutes"
+                Write-Output "User can cancel via: shutdown /a"
+
+                $RebootSeconds = $RebootCountdownMinutes * 60
+                $RebootCommand = "shutdown.exe /r /t $RebootSeconds /c `"BIOS Update Required: System will reboot in $RebootCountdownMinutes minutes to complete critical security update. Save your work now. To cancel: shutdown /a`" /d p:2:18"
+
+                Write-Output "Executing: $RebootCommand"
+
+                try {
+                    Invoke-Expression $RebootCommand
+                    Write-Output "[OK] Reboot scheduled successfully for $(Get-Date).AddMinutes($RebootCountdownMinutes)"
+                }
+                catch {
+                    Write-Error "Failed to schedule reboot: $($_.Exception.Message)"
+                }
+            }
+        }
+
+        Stop-Transcript
+    }
+}

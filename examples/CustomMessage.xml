@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+Toast Notification Configuration - Classic Schema
+This XML uses the simple EventText format (backward compatible)
+
+For PROGRESSIVE MODE with stage-specific messages, use this format instead:
+<EventText>
+    <Stage0>Initial message text for first display (0 snoozes)</Stage0>
+    <Stage1>Message text after 1 snooze</Stage1>
+    <Stage2>Message text after 2 snoozes</Stage2>
+    <Stage3>Urgent message text after 3 snoozes</Stage3>
+    <Stage4>Final critical message after 4 snoozes (non-dismissable)</Stage4>
+</EventText>
+
+See BIOS_Update.xml for a complete progressive mode example.
+-->
+<ToastContent>
+    <ToastTitle>We want to bring to your attention some important information. Please review the details below before contacting the Service Desk</ToastTitle>
+    <Signature>Sent on behalf of the ICT Service Desk</Signature>
+    <EventTitle>Major IT Issues - Flooding</EventTitle>
+    <EventText>We are currently experiencing problems with all our systems. We are drinking coffee with our feet up and will provide an update shortly. Thank you for your patience</EventText>
+    <ButtonTitle>Details</ButtonTitle>
+    <ButtonAction>https://byteben.com</ButtonAction>
+    <SnoozeTitle>Snooze</SnoozeTitle>
+</ToastContent>

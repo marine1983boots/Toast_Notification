@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    BIOS Toast Notification Configuration
+
+    This XML file controls the content displayed in BIOS update toast notifications.
+    The script supports stage-specific messages that escalate as users snooze.
+
+    Stage Progression (based on snooze count):
+    - Stage 0: Initial reminder (friendly tone, dismissible, standard audio)
+    - Stage 1: Second reminder (encouraging tone, dismissible, standard audio)
+    - Stage 2: Warning (serious tone, dismissible, urgent audio)
+    - Stage 3: Critical (urgent tone, dismissible, alarm audio x5 loops)
+    - Stage 4: Final notice (urgent tone, NON-DISMISSIBLE, alarm audio x10 loops)
+
+    IMPORTANT: All special characters must be XML-encoded:
+    - & (ampersand)  -> &amp;
+    - < (less than)  -> &lt;
+    - > (greater than) -> &gt;
+    - " (quote)      -> &quot;
+    - ' (apostrophe) -> &apos;
+-->
+<ToastContent>
+    <!-- Main toast title (appears at top of notification) -->
+    <ToastTitle>Critical BIOS Security Update Required</ToastTitle>
+
+    <!-- Attribution signature (small text at bottom) -->
+    <Signature>IT Security &amp; Compliance Team</Signature>
+
+    <!-- Event title (bold heading in detail section) -->
+    <EventTitle>HP BIOS Firmware Update</EventTitle>
+
+    <!-- Event text (stage-specific messages with escalating urgency) -->
+    <EventText>
+        <Stage0>A critical BIOS security update is available for your HP device. Please schedule the update at your earliest convenience to ensure system security and stability.</Stage0>
+        <Stage1>Your BIOS firmware is out of date. Security vulnerabilities may exist. Please schedule the update soon to maintain compliance.</Stage1>
+        <Stage2>[WARNING] Your BIOS requires immediate attention. Known security vulnerabilities exist. Update required for compliance.</Stage2>
+        <Stage3>[CRITICAL] BIOS update is critically overdue! Immediate action required to address security vulnerabilities.</Stage3>
+        <Stage4>[URGENT] FINAL NOTICE: BIOS update must be completed immediately! System will automatically reboot in 5 minutes to apply critical security update. Save your work now! To cancel reboot: Open Command Prompt and run "shutdown /a"</Stage4>
+    </EventText>
+
+    <!-- Primary action button label and URL -->
+    <ButtonTitle>Learn More</ButtonTitle>
+    <ButtonAction>https://support.hp.com/bios-updates</ButtonAction>
+
+    <!-- Reboot button label (Stage 4 only) -->
+    <RebootTitle>Reboot Now</RebootTitle>
+
+    <!-- Snooze button label -->
+    <SnoozeTitle>Snooze</SnoozeTitle>
+
+    <!-- Image files (must exist in same directory as script) -->
+    <!-- Badge image: Circular logo (1:1 aspect ratio recommended) -->
+    <BadgeImage>BadgeImage_HP.jpg</BadgeImage>
+
+    <!-- Hero image: Banner image (364x180 pixels recommended) -->
+    <HeroImage>HeroImage_BIOS.jpg</HeroImage>
+</ToastContent>
