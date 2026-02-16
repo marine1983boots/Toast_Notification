@@ -5,6 +5,13 @@ Created by:   Ben Whitmore (with AI assistance)
 Filename:     Toast_Snooze_Handler.ps1
 ===========================================================================
 
+Version 1.5.3 - 16/02/2026
+-CRITICAL FIX: Remove settings update from Set-ScheduledTask to avoid credentials error
+-Resolves "username or password is incorrect" error (0x8007052E) on corporate machines
+-Only update trigger, not settings (settings already correct from SYSTEM pre-creation)
+-Corporate GPO requires password validation when modifying group-based principal tasks
+-Pre-created tasks from Toast_Notify.ps1 already have correct settings, no update needed
+
 Version 1.5.2 - 16/02/2026
 -COMPATIBILITY FIX: Removed DeleteExpiredTaskAfter parameter from task settings
 -Resolves "task XML incorrectly formatted" error (0x8004131F) on corporate machines
@@ -431,14 +438,8 @@ try {
         $Task_Trigger = New-ScheduledTaskTrigger -Once -At $NextTrigger
         $Task_Trigger.EndBoundary = $Task_Expiry
 
-        # Update task settings
-        $Task_Settings = New-ScheduledTaskSettingsSet `
-            -Compatibility V1 `
-            -AllowStartIfOnBatteries `
-            -DontStopIfGoingOnBatteries
-
-        # Update the task with new trigger and settings (standard users CAN do this)
-        Set-ScheduledTask -TaskName $TaskName -Trigger $Task_Trigger -Settings $Task_Settings -ErrorAction Stop | Out-Null
+        # Update the task with new trigger (settings already correct from SYSTEM pre-creation)
+        Set-ScheduledTask -TaskName $TaskName -Trigger $Task_Trigger -ErrorAction Stop | Out-Null
         Write-Output "Task trigger updated to: $($NextTrigger.ToString('s'))"
 
         # Enable the task (standard users CAN do this)
