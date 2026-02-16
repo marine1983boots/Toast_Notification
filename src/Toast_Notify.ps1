@@ -5,6 +5,15 @@ Created by:   Ben Whitmore
 Filename:     Toast_Notify.ps1
 ===========================================================================
 
+Version 2.6 - 16/02/2026
+-CRITICAL FIX: Pre-create scheduled tasks during SYSTEM deployment (enterprise solution)
+-Added Initialize-SnoozeTasks function to create 4 disabled snooze tasks during initial deployment
+-Eliminates Access Denied errors when standard users click snooze (USER context can now modify pre-created tasks)
+-Tasks created with USERS group principal and disabled state (activated by snooze handler)
+-Follows PSADT enterprise pattern: SYSTEM pre-creates, USER modifies (cannot create)
+-Function called after Initialize-ToastRegistry in SYSTEM context only
+-Improved permissions model: Standard users modify existing tasks vs. creating new ones
+
 Version 2.5 - 16/02/2026
 -BLOCKER FIX: Stage 3 (final warning) no longer shows snooze button - forces reboot decision
 -BLOCKER FIX: Unregister-ScheduledTask errors no longer fatal (Register with -Force overwrites anyway)
@@ -381,6 +390,105 @@ function Initialize-ToastRegistry {
     }
     catch {
         Write-Warning "Failed to initialize registry: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Initialize-SnoozeTasks {
+    <#
+    .SYNOPSIS
+        Pre-creates disabled scheduled tasks for progressive snooze stages
+    .DESCRIPTION
+        Creates 4 disabled scheduled tasks during SYSTEM deployment that will be activated
+        by the snooze handler running in USER context. This solves the permission issue where
+        standard users cannot create scheduled tasks but CAN modify existing ones.
+
+        This is the enterprise-grade PSADT pattern: SYSTEM creates, USER modifies.
+    .PARAMETER ToastGUID
+        Unique identifier for this toast instance
+    .PARAMETER ToastScriptPath
+        Full path to Toast_Notify.ps1 script
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^[A-F0-9\-]{1,36}$')]
+        [String]$ToastGUID,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateScript({ Test-Path $_ })]
+        [String]$ToastScriptPath
+    )
+
+    # Only create tasks if running as SYSTEM and EnableProgressive is enabled
+    $CurrentIdentity = ([System.Security.Principal.WindowsIdentity]::GetCurrent()).Name
+    if ($CurrentIdentity -ne "NT AUTHORITY\SYSTEM") {
+        Write-Verbose "Not running as SYSTEM - skipping task pre-creation"
+        return $false
+    }
+
+    if (-not $EnableProgressive) {
+        Write-Verbose "Progressive mode not enabled - skipping task pre-creation"
+        return $false
+    }
+
+    Write-Output "Pre-creating snooze scheduled tasks for progressive mode..."
+    $SuccessCount = 0
+
+    for ($i = 1; $i -le 4; $i++) {
+        $TaskName = "Toast_Notification_$($ToastGUID)_Snooze$i"
+
+        # Check if task already exists
+        $ExistingTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+        if ($ExistingTask) {
+            Write-Output "  Task already exists: $TaskName [SKIPPED]"
+            $SuccessCount++
+            continue
+        }
+
+        try {
+            # Create task action
+            $Task_Action = New-ScheduledTaskAction `
+                -Execute "C:\WINDOWS\system32\WindowsPowerShell\v1.0\PowerShell.exe" `
+                -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""$ToastScriptPath"" -ToastGUID ""$ToastGUID"" -EnableProgressive -SnoozeCount $i"
+
+            # Create principal (USERS group - allows all users to modify)
+            $Task_Principal = New-ScheduledTaskPrincipal -GroupId "S-1-5-32-545" -RunLevel Limited
+
+            # Create settings (task disabled by default, no trigger)
+            $Task_Settings = New-ScheduledTaskSettingsSet `
+                -Compatibility V1 `
+                -AllowStartIfOnBatteries `
+                -DontStopIfGoingOnBatteries `
+                -Disable
+
+            # Create task (no trigger - will be set by snooze handler)
+            $New_Task = New-ScheduledTask `
+                -Description "Progressive Toast Notification - Snooze $i (pre-created, disabled until activated by snooze handler)" `
+                -Action $Task_Action `
+                -Principal $Task_Principal `
+                -Settings $Task_Settings
+
+            # Register task (running as SYSTEM, so this works)
+            Register-ScheduledTask -TaskName $TaskName -InputObject $New_Task -Force -ErrorAction Stop | Out-Null
+            Write-Output "  Pre-created task: $TaskName [DISABLED]"
+            $SuccessCount++
+        }
+        catch {
+            Write-Warning "  Failed to pre-create task $TaskName: $($_.Exception.Message)"
+        }
+    }
+
+    if ($SuccessCount -eq 4) {
+        Write-Output "[OK] All 4 snooze tasks pre-created successfully"
+        return $true
+    }
+    elseif ($SuccessCount -gt 0) {
+        Write-Warning "Only $SuccessCount of 4 tasks created - snooze may fail at later stages"
+        return $true
+    }
+    else {
+        Write-Error "Failed to create any snooze tasks"
         return $false
     }
 }
@@ -1408,6 +1516,17 @@ If ($XMLValid -eq $True) {
             }
             elseif ($RegistryHive -eq 'HKCU') {
                 Write-Output "Using HKCU mode - No permission grant needed (per-user state)"
+            }
+
+            # Pre-create snooze scheduled tasks (enterprise solution for standard user permissions)
+            Write-Output "Pre-creating snooze scheduled tasks..."
+            $TaskInitResult = Initialize-SnoozeTasks -ToastGUID $ToastGUID -ToastScriptPath $ScriptPath
+            if ($TaskInitResult) {
+                Write-Output "[OK] Snooze tasks pre-created - standard users can now activate them"
+            }
+            else {
+                Write-Warning "Snooze task pre-creation failed - users may encounter Access Denied errors"
+                Write-Warning "Progressive snooze functionality may not work correctly"
             }
 
             # Register toast-snooze:// protocol handler in HKEY_CLASSES_ROOT
