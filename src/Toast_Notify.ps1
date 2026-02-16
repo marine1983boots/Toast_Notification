@@ -5,6 +5,13 @@ Created by:   Ben Whitmore
 Filename:     Toast_Notify.ps1
 ===========================================================================
 
+Version 2.9 - 16/02/2026
+-COMPLETE REMOVAL: Deleted entire Show-FallbackNotification function and all fallback logic
+-Removed all $Script:FallbackReason and $Script:UseForceFailback references
+-Removed RecommendedFallback property from Test-CorporateEnvironment
+-Script now fails cleanly without confusing fallback notifications
+-No more default BIOS XML showing when custom XML should display
+
 Version 2.8 - 16/02/2026
 -DIAGNOSTIC: Disabled fallback notification for clean failure analysis
 -Removed Show-FallbackNotification call when toast display fails
@@ -1112,7 +1119,6 @@ function Test-CorporateEnvironment {
         CanWriteHKCU = $true
         WinRTAvailable = $true
         NotificationSystemEnabled = $true
-        RecommendedFallback = 'None'
     }
 
     # Test 1: HKCU write capability (GPO restrictions)
@@ -1168,22 +1174,8 @@ function Test-CorporateEnvironment {
         Write-Verbose "Notification system test: UNKNOWN"
     }
 
-    # Determine recommended fallback method
+    # Log corporate restrictions if detected
     if ($Result.IsRestricted) {
-        # Check user context
-        $IsInteractive = [Environment]::UserInteractive
-        $IsSystem = ([System.Security.Principal.WindowsIdentity]::GetCurrent()).Name -eq "NT AUTHORITY\SYSTEM"
-
-        if ($IsInteractive -and -not $IsSystem) {
-            $Result.RecommendedFallback = 'MessageBox'
-        }
-        elseif (-not $IsSystem) {
-            $Result.RecommendedFallback = 'EventLog'
-        }
-        else {
-            $Result.RecommendedFallback = 'LogFile'
-        }
-
         Write-Verbose "Corporate restrictions detected: $($Result.Restrictions.Count) restriction(s)"
     }
 
@@ -1242,155 +1234,8 @@ function Test-WinRTAssemblies {
     }
 }
 
-function Show-FallbackNotification {
-    <#
-    .SYNOPSIS
-        Displays notification when toast fails using fallback methods
-    .DESCRIPTION
-        Implements 3-tier fallback: MessageBox -> EventLog -> LogFile
-        Auto-detects user context and selects appropriate method.
-    .PARAMETER Title
-        Notification title
-    .PARAMETER Message
-        Notification content
-    .PARAMETER Method
-        'MessageBox', 'EventLog', 'LogFile', or 'Auto' (default: Auto)
-    .PARAMETER Severity
-        'Information', 'Warning', 'Error' (default: Warning)
-    .EXAMPLE
-        Show-FallbackNotification -Title "Update Required" -Message "Please restart" -Method Auto -Severity Warning
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        [String]$Title,
-
-        [Parameter(Mandatory = $true)]
-        [String]$Message,
-
-        [Parameter(Mandatory = $false)]
-        [ValidateSet('MessageBox', 'EventLog', 'LogFile', 'Auto')]
-        [String]$Method = 'Auto',
-
-        [Parameter(Mandatory = $false)]
-        [ValidateSet('Information', 'Warning', 'Error')]
-        [String]$Severity = 'Warning'
-    )
-
-    $FallbackSucceeded = $false
-
-    # Auto-detect method if requested
-    if ($Method -eq 'Auto') {
-        $IsInteractive = [Environment]::UserInteractive
-        $IsSystem = ([System.Security.Principal.WindowsIdentity]::GetCurrent()).Name -eq "NT AUTHORITY\SYSTEM"
-
-        if ($IsInteractive -and -not $IsSystem) {
-            $Method = 'MessageBox'
-        }
-        elseif (-not $IsSystem) {
-            $Method = 'EventLog'
-        }
-        else {
-            $Method = 'LogFile'
-        }
-        Write-Verbose "Auto-selected fallback method: $Method"
-    }
-
-    # Attempt primary method
-    switch ($Method) {
-        'MessageBox' {
-            try {
-                Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
-
-                $Icon = switch ($Severity) {
-                    'Error' { [System.Windows.Forms.MessageBoxIcon]::Error }
-                    'Warning' { [System.Windows.Forms.MessageBoxIcon]::Warning }
-                    default { [System.Windows.Forms.MessageBoxIcon]::Information }
-                }
-
-                [System.Windows.Forms.MessageBox]::Show($Message, $Title, [System.Windows.Forms.MessageBoxButtons]::OK, $Icon) | Out-Null
-                Write-Output "[OK] Fallback notification displayed via MessageBox"
-                $FallbackSucceeded = $true
-            }
-            catch {
-                Write-Warning "MessageBox fallback failed: $($_.Exception.Message)"
-                Write-Warning "Cascading to EventLog..."
-                $Method = 'EventLog'
-            }
-        }
-    }
-
-    # Cascade to EventLog if MessageBox failed
-    if (-not $FallbackSucceeded -and $Method -eq 'EventLog') {
-        try {
-            $EventLogSource = "ToastNotification"
-
-            # Check if event source exists
-            if (-not [System.Diagnostics.EventLog]::SourceExists($EventLogSource)) {
-                # Try to create it (requires admin rights)
-                try {
-                    New-EventLog -LogName Application -Source $EventLogSource -ErrorAction Stop
-                    Write-Verbose "Created event source: $EventLogSource"
-                }
-                catch {
-                    Write-Warning "Cannot create event source (requires admin): $($_.Exception.Message)"
-                    Write-Warning "Cascading to LogFile..."
-                    $Method = 'LogFile'
-                }
-            }
-
-            if ([System.Diagnostics.EventLog]::SourceExists($EventLogSource)) {
-                $EventType = switch ($Severity) {
-                    'Error' { 'Error' }
-                    'Warning' { 'Warning' }
-                    default { 'Information' }
-                }
-
-                $EventMessage = "$Title`n`n$Message"
-                Write-EventLog -LogName Application -Source $EventLogSource -EntryType $EventType -EventId 1000 -Message $EventMessage -ErrorAction Stop
-
-                Write-Output "[OK] Fallback notification logged to Event Log"
-                $FallbackSucceeded = $true
-            }
-        }
-        catch {
-            Write-Warning "EventLog fallback failed: $($_.Exception.Message)"
-            Write-Warning "Cascading to LogFile..."
-            $Method = 'LogFile'
-        }
-    }
-
-    # Final cascade to LogFile (always succeeds)
-    if (-not $FallbackSucceeded -and $Method -eq 'LogFile') {
-        try {
-            $LogDir = Join-Path $env:ProgramData "ToastNotification\Logs"
-            if (-not (Test-Path $LogDir)) {
-                New-Item -Path $LogDir -ItemType Directory -Force | Out-Null
-            }
-
-            $LogFile = Join-Path $LogDir "FallbackNotifications.log"
-            $Timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-            $LogEntry = @"
-
-========================================
-[$Timestamp] [$Severity] $Title
-========================================
-$Message
-========================================
-
-"@
-            Add-Content -Path $LogFile -Value $LogEntry -Force
-            Write-Output "[OK] Fallback notification written to log: $LogFile"
-            $FallbackSucceeded = $true
-        }
-        catch {
-            Write-Error "All fallback methods failed: $($_.Exception.Message)"
-            $FallbackSucceeded = $false
-        }
-    }
-
-    return $FallbackSucceeded
-}
+# Show-FallbackNotification function REMOVED for clean failure debugging
+# Fallback notifications were confusing troubleshooting by hiding actual errors
 
 #endregion Helper Functions
 
@@ -1840,8 +1685,6 @@ If ($XMLValid -eq $True) {
 
         #Load WinRT Assemblies with validation
         Write-Verbose "Loading Windows Runtime assemblies..."
-        $Script:UseForceFailback = $false
-        $Script:FallbackReason = ""
         $Script:CorporateEnvironment = $null
 
         try {
@@ -1874,17 +1717,15 @@ If ($XMLValid -eq $True) {
                 # Detect corporate environment
                 $CorpEnv = Test-CorporateEnvironment
                 if ($CorpEnv.IsRestricted) {
-                    Write-Warning "Corporate restrictions: $($CorpEnv.Restrictions -join ', ')"
-                    Write-Warning "Recommended fallback: $($CorpEnv.RecommendedFallback)"
+                    Write-Warning "Corporate restrictions detected: $($CorpEnv.Restrictions -join ', ')"
                     $Script:CorporateEnvironment = $CorpEnv
                 }
             }
         }
         catch {
             Write-Error "Critical: WinRT assemblies unavailable: $($_.Exception.Message)"
-            $Script:UseForceFailback = $true
-            $Script:FallbackReason = "WinRT: $($_.Exception.Message)"
-            Write-Warning "Will use fallback notification methods only"
+            Write-Error "Toast notifications will not work without WinRT assemblies"
+            throw
         }
 
         #Get stage configuration if progressive mode enabled
@@ -2158,7 +1999,7 @@ If ($XMLValid -eq $True) {
                         Write-Warning "[CORPORATE RESTRICTION DETECTED]"
                         Write-Warning "GPO policy prevents AppId registration"
                         Write-Warning "Toast notifications may fail to display"
-                        Write-Warning "Fallback notification will be used if needed"
+                        Write-Warning "Script will fail cleanly if toast cannot be shown"
                         Write-Warning "========================================="
 
                         # Pre-emptive corporate environment detection
