@@ -5,8 +5,8 @@
 | Field | Value |
 |-------|-------|
 | Document Title | Technical Documentation - Progressive Toast Notification System v3.0 |
-| Version | 3.0.1 |
-| Date | 2026-02-13 |
+| Version | 3.1 |
+| Date | 2026-02-16 |
 | Author | CR |
 | Based On | Toast by Ben Whitmore (@byteben) |
 | License | GNU General Public License v3 |
@@ -27,6 +27,7 @@
 | 2.2 | 2026-02-12 | CR | Added progressive enforcement system, security hardening |
 | 3.0 | 2026-02-12 | CR | Production release with comprehensive documentation |
 | 3.0.1 | 2026-02-13 | CR | Added corporate environment compatibility (v2.2 error handling) |
+| 3.1 | 2026-02-16 | CR | Added configurable registry/log locations (v2.3), permission management, HKCU mode |
 
 ## Table of Contents
 
@@ -40,11 +41,12 @@
 8. [Operational Procedures](#8-operational-procedures)
 9. [Security Controls](#9-security-controls)
 10. [Corporate Environment Compatibility](#10-corporate-environment-compatibility)
-11. [Testing and Validation](#11-testing-and-validation)
-12. [Troubleshooting Guide](#12-troubleshooting-guide)
-13. [Maintenance Procedures](#13-maintenance-procedures)
-14. [Quality Records](#14-quality-records)
-15. [References](#15-references)
+11. [Registry and Log Configuration](#11-registry-and-log-configuration)
+12. [Testing and Validation](#12-testing-and-validation)
+13. [Troubleshooting Guide](#13-troubleshooting-guide)
+14. [Maintenance Procedures](#14-maintenance-procedures)
+15. [Quality Records](#15-quality-records)
+16. [References](#16-references)
 
 ---
 
@@ -1885,7 +1887,469 @@ Invoke-Command -ComputerName (Get-ADComputer -Filter *).Name -ScriptBlock {
 
 ---
 
-## 11. Testing and Validation
+## 11. Registry and Log Configuration
+
+### 11.1 Overview
+
+Version 2.3 introduces flexible registry and logging configuration to address corporate environment restrictions and enable per-user state management. This section documents the configuration parameters, deployment scenarios, and troubleshooting procedures.
+
+**Key Features:**
+- Configurable registry hive (HKLM, HKCU, Custom)
+- Custom registry path support
+- Automatic permission management for HKLM mode
+- Centralized logging configuration
+- Full backwards compatibility (defaults to HKLM)
+
+### 11.2 Registry Hive Options
+
+The `$RegistryHive` parameter controls where toast state is stored.
+
+#### 11.2.1 HKLM Mode (Machine-Wide State)
+
+**Parameter:** `-RegistryHive HKLM` (default)
+
+**Registry Location:** `HKLM:\SOFTWARE\ToastNotification\{ToastGUID}`
+
+**Characteristics:**
+- All users share the same snooze count
+- Machine-wide progressive enforcement
+- Ensures machine gets rebooted regardless of which user logs in
+- Requires permission grant during SYSTEM deployment
+
+**When to Use:**
+- SCCM/Intune deployments running as SYSTEM
+- Single-user workstations
+- Enforcing reboot/update compliance across all users
+- Corporate environments where machine state is critical
+
+**Permission Management:**
+When deployed as SYSTEM with HKLM mode, the `Grant-RegistryPermissions` function automatically:
+1. Grants BUILTIN\Users group write access to the specific ToastGUID registry path
+2. Validates scope (only the specific GUID path, not parent or siblings)
+3. Verifies parent path protection unchanged
+4. Logs permission grant for IT audit trail
+
+**Security Scope:**
+```
+HKLM:\
+└── SOFTWARE\
+    ├── Microsoft\                               [PROTECTED - Admin only]
+    ├── Other\                                   [PROTECTED - Admin only]
+    └── ToastNotification\                       [PROTECTED - Admin only]
+        ├── ABC-123-DEF-456\                     [USERS CAN WRITE - This toast only]
+        │   ├── SnoozeCount                      [USERS CAN WRITE]
+        │   ├── LastShown                        [USERS CAN WRITE]
+        │   └── LastSnoozeInterval               [USERS CAN WRITE]
+        ├── XYZ-789-GHI-012\                     [PROTECTED - Different toast]
+        └── FallbackUsage\                       [PROTECTED - Admin only]
+```
+
+**Deployment Example:**
+```powershell
+# Deploy as SYSTEM (SCCM/Intune package)
+powershell.exe -ExecutionPolicy Bypass -File Toast_Notify.ps1 `
+    -ToastGUID "ABC-123-DEF" `
+    -EnableProgressive `
+    -RegistryHive HKLM `
+    -LogDirectory "C:\ProgramData\Logs\ToastNotifications"
+```
+
+**Output:**
+```
+Registry initialization verified: SnoozeCount=0
+Granting USERS group permissions to registry path for snooze handler...
+[OK] Registry permissions granted to USERS group for THIS PATH ONLY: HKLM:\SOFTWARE\ToastNotification\ABC-123-DEF
+[OK] Parent path (SOFTWARE\ToastNotification) remains protected
+SECURITY VERIFIED: Parent path still protected (no USERS write access)
+```
+
+#### 11.2.2 HKCU Mode (Per-User State)
+
+**Parameter:** `-RegistryHive HKCU`
+
+**Registry Location:** `HKCU:\SOFTWARE\ToastNotification\{ToastGUID}`
+
+**Characteristics:**
+- Each user has independent snooze count
+- No permission management needed (users can write to own HKCU)
+- Fresh toast state for each user login
+- Ideal for multi-user environments
+
+**When to Use:**
+- Multi-user workstations (Terminal Server, Citrix, shared devices)
+- Each user should see fresh notifications regardless of others
+- Corporate environments with restrictive GPO policies on HKLM
+- Development/testing environments
+
+**Deployment Example:**
+```powershell
+# Deploy in user context (no SYSTEM required)
+powershell.exe -ExecutionPolicy Bypass -File Toast_Notify.ps1 `
+    -ToastGUID "ABC-123-DEF" `
+    -EnableProgressive `
+    -RegistryHive HKCU `
+    -LogDirectory "%APPDATA%\Logs\ToastNotifications"
+```
+
+**Behavior:**
+```
+User Alice logs in → Sees Stage 0 toast → Snoozes 3 times
+User Bob logs in   → Sees Stage 0 toast (independent state)
+User Alice logs in → Sees Stage 3 toast (state preserved per-user)
+```
+
+#### 11.2.3 Custom Mode (Custom Registry Path)
+
+**Parameter:** `-RegistryHive Custom -RegistryPath "YOUR\CUSTOM\PATH"`
+
+**Registry Location:** Determined by administrator
+
+**Characteristics:**
+- Full control over registry location
+- Supports corporate compliance requirements
+- Custom path validation required
+- Advanced scenario only
+
+**When to Use:**
+- Corporate policy mandates specific registry structure
+- Custom application integration requirements
+- Compliance with internal IT governance
+- Advanced testing scenarios
+
+**Path Validation:**
+- Pattern: `^[a-zA-Z0-9_\\]+$`
+- Prevents: relative paths (../), special characters, injection attacks
+- Allows: alphanumeric, underscore, backslash only
+
+**Deployment Example:**
+```powershell
+# Corporate custom path example
+powershell.exe -ExecutionPolicy Bypass -File Toast_Notify.ps1 `
+    -ToastGUID "ABC-123-DEF" `
+    -EnableProgressive `
+    -RegistryHive Custom `
+    -RegistryPath "SOFTWARE\Contoso\UserNotifications" `
+    -LogDirectory "\\FileServer\Logs\Toast"
+```
+
+**IMPORTANT:** When using Custom mode with HKLM-style paths, you must manually grant permissions or ensure users have write access to the custom location.
+
+**Manual Permission Grant (Custom paths):**
+```powershell
+# Run as Administrator
+$CustomPath = "HKLM:\SOFTWARE\Contoso\UserNotifications\ABC-123-DEF"
+$Acl = Get-Acl -Path $CustomPath
+$Rule = New-Object System.Security.AccessControl.RegistryAccessRule(
+    "BUILTIN\Users",
+    "FullControl",
+    "ContainerInherit,ObjectInherit",
+    "None",
+    "Allow"
+)
+$Acl.AddAccessRule($Rule)
+Set-Acl -Path $CustomPath -AclObject $Acl
+
+# Verify
+Get-Acl $CustomPath | Format-List
+```
+
+### 11.3 Log Directory Configuration
+
+The `$LogDirectory` parameter controls where log files are written.
+
+**Parameter:** `-LogDirectory "C:\Path\To\Logs"`
+
+**Default Behavior:**
+- If not specified: Script staging directory (`$ENV:Windir\Temp\{ToastGUID}`)
+- If specified: Custom directory (created if doesn't exist)
+
+**Log Files Created:**
+- `Toast_Notify.log` - Main script execution log
+- `{ToastGUID}_Snooze.log` - Snooze handler operations
+- `Toast_Reboot_Handler.log` - Reboot button operations
+
+**Validation:**
+- Path must be valid Windows path
+- PowerShell validation: `Test-Path $_ -PathType Container -IsValid`
+- Directory created automatically if doesn't exist
+
+**Centralized Logging Example:**
+```powershell
+# Centralize all toast logs for IT monitoring
+powershell.exe -ExecutionPolicy Bypass -File Toast_Notify.ps1 `
+    -EnableProgressive `
+    -LogDirectory "C:\ProgramData\Logs\ToastNotifications"
+```
+
+**UNC Path Support:**
+```powershell
+# Log to network share (ensure permissions)
+-LogDirectory "\\FileServer\Logs\ToastNotifications"
+```
+
+**Per-User Logging:**
+```powershell
+# Each user logs to their own profile
+-LogDirectory "%APPDATA%\ToastNotifications\Logs"
+```
+
+### 11.4 Corporate Deployment Scenarios
+
+#### Scenario A: SCCM Deployment with HKLM (Recommended)
+
+**Use Case:** Standard enterprise deployment, machine-wide compliance enforcement
+
+**Configuration:**
+```powershell
+# SCCM Package Properties:
+# - Run as: SYSTEM
+# - Program Type: Standard Program
+# - User interaction: Hidden
+
+# Command line:
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File Toast_Notify.ps1 `
+    -ToastGUID "SCCM-BIOS-UPDATE-2024" `
+    -XMLSource "BIOS_Update.xml" `
+    -EnableProgressive `
+    -RegistryHive HKLM `
+    -LogDirectory "C:\ProgramData\Logs\SCCM\ToastNotifications"
+```
+
+**Result:**
+- ACL permissions automatically granted to BUILTIN\Users
+- All users share snooze count (machine-wide enforcement)
+- Centralized logging for SCCM reporting
+- No user intervention required for deployment
+
+#### Scenario B: Intune Deployment with HKCU
+
+**Use Case:** Cloud-joined devices, per-user notifications
+
+**Configuration:**
+```powershell
+# Intune Win32 App:
+# - Install context: User
+# - Detection method: Registry key exists
+
+# Install command:
+powershell.exe -ExecutionPolicy Bypass -File Toast_Notify.ps1 `
+    -ToastGUID "INTUNE-UPDATE-2024" `
+    -EnableProgressive `
+    -RegistryHive HKCU `
+    -LogDirectory "%LOCALAPPDATA%\ToastLogs"
+```
+
+**Result:**
+- No permission issues (HKCU always writable by user)
+- Each user has independent toast state
+- Logs stored per-user for troubleshooting
+- Simpler deployment (no SYSTEM context required)
+
+#### Scenario C: GPO-Restricted Environment
+
+**Use Case:** Corporate environment with GPO blocking HKLM writes
+
+**Problem:**
+- GPO policy prevents USER context from writing to HKLM
+- Standard HKLM mode fails with Access Denied
+
+**Solution 1: Use HKCU Mode**
+```powershell
+# Deploy with per-user state
+powershell.exe -ExecutionPolicy Bypass -File Toast_Notify.ps1 `
+    -EnableProgressive `
+    -RegistryHive HKCU
+```
+
+**Solution 2: Deploy as SYSTEM (Preferred)**
+```powershell
+# Deploy via SCCM/Intune as SYSTEM
+# Permissions granted automatically, works despite GPO
+```
+
+**Solution 3: Manual Permission Grant**
+```powershell
+# IT Admin runs once per machine
+$ToastGUID = "ABC-123-DEF"
+$RegPath = "HKLM:\SOFTWARE\ToastNotification\$ToastGUID"
+
+# Create path if doesn't exist
+if (!(Test-Path $RegPath)) {
+    New-Item -Path "HKLM:\SOFTWARE\ToastNotification" -Name $ToastGUID -Force
+}
+
+# Grant permissions
+$Acl = Get-Acl $RegPath
+$Rule = New-Object System.Security.AccessControl.RegistryAccessRule(
+    "BUILTIN\Users", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow"
+)
+$Acl.AddAccessRule($Rule)
+Set-Acl -Path $RegPath -AclObject $Acl
+
+Write-Host "[OK] Permissions granted to $RegPath"
+```
+
+#### Scenario D: Custom Corporate Path
+
+**Use Case:** Corporate IT governance requires specific registry structure
+
+**Configuration:**
+```powershell
+# Corporate standard: HKLM:\SOFTWARE\CompanyName\Notifications
+powershell.exe -ExecutionPolicy Bypass -File Toast_Notify.ps1 `
+    -ToastGUID "CORP-NOTIFICATION-001" `
+    -EnableProgressive `
+    -RegistryHive Custom `
+    -RegistryPath "SOFTWARE\CompanyName\Notifications" `
+    -LogDirectory "\\CORPFS01\Logs\Notifications"
+```
+
+**Prerequisites:**
+1. Create base path: `HKLM:\SOFTWARE\CompanyName\Notifications`
+2. Grant USERS write access to base path (or use SYSTEM deployment)
+3. Ensure network share accessible if using UNC logging path
+4. Test with single machine before broad deployment
+
+### 11.5 Troubleshooting Registry Permission Errors
+
+#### Error: "Access Denied" at Toast_Snooze_Handler.ps1
+
+**Symptom:**
+User clicks snooze button, receives error:
+```
+ACCESS DENIED - Registry Write Failed
+This error indicates incorrect deployment or GPO restrictions.
+```
+
+**Diagnosis:**
+
+**Step 1: Check Deployment Context**
+```powershell
+# Was Toast_Notify.ps1 deployed as SYSTEM?
+Get-ItemProperty HKLM:\SOFTWARE\ToastNotification\{GUID} -ErrorAction SilentlyContinue
+
+# If this returns $null, deployment didn't run as SYSTEM or failed
+```
+
+**Step 2: Check ACL Permissions**
+```powershell
+# Check if USERS group has write access
+$ToastGUID = "ABC-123-DEF"  # Replace with your GUID
+$RegPath = "HKLM:\SOFTWARE\ToastNotification\$ToastGUID"
+
+if (Test-Path $RegPath) {
+    $Acl = Get-Acl $RegPath
+    $Acl.Access | Where-Object { $_.IdentityReference -eq "BUILTIN\Users" } | Format-List
+}
+else {
+    Write-Host "[FAIL] Registry path not found. Deployment may not have run."
+}
+```
+
+**Expected Output (Correct):**
+```
+IdentityReference : BUILTIN\Users
+RegistryRights    : FullControl
+InheritanceFlags  : ContainerInherit, ObjectInherit
+PropagationFlags  : None
+AccessControlType : Allow
+```
+
+**Step 3: Check GPO Restrictions**
+```powershell
+# Test if GPO blocks HKLM writes from user context
+Test-Path HKLM:\SOFTWARE\ToastNotification\TestKey
+
+# If Test-Path returns $false, GPO may be blocking
+```
+
+**Solutions:**
+
+**Solution 1: Re-deploy as SYSTEM (Recommended)**
+```powershell
+# Proper SCCM/Intune deployment will automatically grant permissions
+psexec.exe -s powershell.exe -ExecutionPolicy Bypass -File Toast_Notify.ps1 `
+    -ToastGUID "ABC-123" -EnableProgressive
+```
+
+**Solution 2: Switch to HKCU Mode**
+```powershell
+# No permissions needed, each user independent
+powershell.exe -ExecutionPolicy Bypass -File Toast_Notify.ps1 `
+    -ToastGUID "ABC-123" -EnableProgressive -RegistryHive HKCU
+```
+
+**Solution 3: Manual Permission Grant**
+See "Manual Permission Grant" section in 11.4 Scenario C above.
+
+**Solution 4: Custom Registry Path**
+```powershell
+# Use path where users already have write access
+powershell.exe -ExecutionPolicy Bypass -File Toast_Notify.ps1 `
+    -ToastGUID "ABC-123" `
+    -EnableProgressive `
+    -RegistryHive Custom `
+    -RegistryPath "SOFTWARE\YourCompany\Notifications"
+```
+
+### 11.6 Parameter Reference
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `-RegistryHive` | String | HKLM | Registry hive: HKLM, HKCU, or Custom |
+| `-RegistryPath` | String | SOFTWARE\ToastNotification | Registry path under hive |
+| `-LogDirectory` | String | Script staging dir | Custom log file location |
+
+**Parameter Validation:**
+- `$RegistryHive`: ValidateSet('HKLM', 'HKCU', 'Custom')
+- `$RegistryPath`: ValidatePattern('^[a-zA-Z0-9_\\]+$')
+- `$LogDirectory`: ValidateScript({ Test-Path $_ -PathType Container -IsValid })
+
+### 11.7 Security Considerations
+
+**Permission Scope:**
+- Permissions granted ONLY to specific ToastGUID registry path
+- Parent path (`HKLM:\SOFTWARE\ToastNotification`) remains protected
+- Other registry locations unaffected
+- Verification performed after grant to ensure scope integrity
+
+**Security Validation:**
+```powershell
+# After permission grant, verification happens automatically:
+$ParentPath = "HKLM:\SOFTWARE\ToastNotification"
+$ParentAcl = Get-Acl -Path $ParentPath
+$ParentUserRules = $ParentAcl.Access | Where-Object { $_.IdentityReference -eq "BUILTIN\Users" }
+
+if ($ParentUserRules.Count -eq 0) {
+    Write-Verbose "SECURITY VERIFIED: Parent path still protected"
+}
+```
+
+**Least Privilege Recommendation:**
+For v2.4, consider reducing permission from FullControl to:
+- `SetValue` - Write registry values
+- `ReadKey` - Read existing values
+- This would be sufficient for snooze handler operations
+
+### 11.8 Backwards Compatibility
+
+**Version 2.3 maintains full backwards compatibility:**
+- Default parameters match v2.2 behavior
+- Existing deployments continue working without modification
+- No configuration changes required
+- Registry location unchanged unless explicitly specified
+
+**Migration Path:**
+- Optional: Re-deploy to grant ACL permissions
+- Optional: Switch to HKCU mode for multi-user scenarios
+- Optional: Customize paths per corporate requirements
+
+**No Breaking Changes:**
+All new parameters are optional with sensible defaults.
+
+---
+
+## 12. Testing and Validation
 
 See DEPLOYMENT_GUIDE_TOAST_v3.0.md Section 7 for detailed test plans.
 

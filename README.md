@@ -1,5 +1,16 @@
 # Version History
 
+**Version 2.3 - 16/02/2026**
+
+- Added configurable registry location: `-RegistryHive` parameter (HKLM/HKCU/Custom)
+- Added custom registry path support: `-RegistryPath` parameter
+- Added centralized logging: `-LogDirectory` parameter
+- Automatic permission management for HKLM mode (Grant-RegistryPermissions function)
+- Fixes "Access Denied" errors in corporate environments when snooze button clicked
+- Enables per-user state mode (HKCU) for multi-user scenarios
+- Updated protocol handlers to pass registry and log parameters
+- Full backwards compatibility maintained (defaults to HKLM)
+
 **Version 2.1 - 11/02/2026**
 
 - Added -ToastScenario parameter to control toast notification priority and behavior
@@ -129,7 +140,63 @@ Toast_Notify.ps1 -XMLSource "Maintenance.xml" -ToastScenario "reminder" -Snooze
 **.EXAMPLE**
 
 Toast_Notify.ps1 -Snooze
-  
+
+### New Parameters (v2.3+)
+
+**Registry Configuration:**
+
+**.PARAMETER RegistryHive**
+
+Controls where toast state is stored. Valid values:
+- **HKLM** (default): Machine-wide state. All users share the same snooze count. Requires permission grant during SYSTEM deployment. Best for ensuring machine gets rebooted regardless of user.
+- **HKCU**: Per-user state. Each user has independent snooze count. No permission issues. Best for multi-user machines.
+- **Custom**: Advanced scenario for custom registry paths. Requires manual permission management.
+
+**.PARAMETER RegistryPath**
+
+Custom registry path under the hive (default: SOFTWARE\ToastNotification). Only used when RegistryHive is Custom.
+
+**.PARAMETER LogDirectory**
+
+Override log file location for centralized IT monitoring (default: script staging directory).
+
+**.EXAMPLE - HKLM Mode (Corporate Deployment)**
+
+```powershell
+# Deploy as SYSTEM with automatic permission grant
+powershell.exe -ExecutionPolicy Bypass -File Toast_Notify.ps1 `
+    -EnableProgressive `
+    -RegistryHive HKLM `
+    -LogDirectory "C:\ProgramData\Logs\ToastNotifications"
+```
+
+**.EXAMPLE - HKCU Mode (Multi-User)**
+
+```powershell
+# Each user has independent state, no permission issues
+powershell.exe -ExecutionPolicy Bypass -File Toast_Notify.ps1 `
+    -EnableProgressive `
+    -RegistryHive HKCU
+```
+
+**.EXAMPLE - Custom Registry Path**
+
+```powershell
+# Corporate compliance with custom paths
+powershell.exe -ExecutionPolicy Bypass -File Toast_Notify.ps1 `
+    -EnableProgressive `
+    -RegistryHive Custom `
+    -RegistryPath "SOFTWARE\CompanyName\Notifications" `
+    -LogDirectory "\\FileServer\Logs\Toast"
+```
+
+**Troubleshooting:**
+
+If you encounter "Access Denied" errors when clicking snooze:
+1. Re-deploy as SYSTEM with `-RegistryHive HKLM` (automatic permission grant)
+2. Switch to HKCU mode: `-RegistryHive HKCU` (no permissions needed)
+3. See TECHNICAL_DOCUMENTATION_TOAST_v3.0.md Section 11 for detailed troubleshooting
+
 **Known Issues** 
   
 -Images in the XML can only be read from the local file system. This is not an issue if we are deploying the package from MEMCM  

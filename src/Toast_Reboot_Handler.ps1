@@ -16,11 +16,17 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [String]$ProtocolUri
+    [String]$ProtocolUri,
+    [Parameter(Mandatory = $false)]
+    [String]$LogDirectory = $ENV:WINDIR + "\Temp"
 )
 
 # Start logging
-$LogPath = Join-Path $ENV:WINDIR "Temp\Toast_Reboot_Handler.log"
+$LogPath = Join-Path $LogDirectory "Toast_Reboot_Handler.log"
+# Ensure log directory exists
+if (!(Test-Path $LogDirectory)) {
+    New-Item -Path $LogDirectory -ItemType Directory -Force | Out-Null
+}
 Start-Transcript -Path $LogPath -Append
 
 Write-Output "========================================="

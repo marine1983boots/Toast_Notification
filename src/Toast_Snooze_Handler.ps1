@@ -5,6 +5,13 @@ Created by:   Ben Whitmore (with AI assistance)
 Filename:     Toast_Snooze_Handler.ps1
 ===========================================================================
 
+Version 1.2 - 16/02/2026
+-Added configurable registry location: $RegistryHive and $RegistryPath parameters
+-Added $LogDirectory parameter for centralized logging
+-Added comprehensive UnauthorizedAccessException error handling with solution guidance
+-Dynamic registry path construction based on deployment configuration
+-Fixes Access Denied errors in corporate environments
+
 Version 1.1 - 12/02/2026
 -Applied [System.Uri] class for proper protocol URI parsing
 -Added post-decode validation to prevent bypass attacks
@@ -57,7 +64,14 @@ Toast_Notify.ps1 deployment but executes in USER context when invoked.
 Param(
     [Parameter(Mandatory = $true)]
     [ValidatePattern('^toast-snooze://[A-F0-9\-]{1,36}/(15m|30m|1h|2h|4h|eod)$')]
-    [String]$ProtocolUri
+    [String]$ProtocolUri,
+    [Parameter(Mandatory = $false)]
+    [ValidateSet('HKLM', 'HKCU')]
+    [String]$RegistryHive = 'HKLM',
+    [Parameter(Mandatory = $false)]
+    [String]$RegistryPath = 'SOFTWARE\ToastNotification',
+    [Parameter(Mandatory = $false)]
+    [String]$LogDirectory = $ENV:Windir + "\Temp"
 )
 
 #region Helper Functions
@@ -166,7 +180,11 @@ catch {
 }
 
 # Start logging
-$LogPath = (Join-Path $ENV:Windir "Temp\$($ToastGuid)_Snooze.log")
+$LogPath = Join-Path $LogDirectory "$($ToastGuid)_Snooze.log"
+# Ensure log directory exists
+if (!(Test-Path $LogDirectory)) {
+    New-Item -Path $LogDirectory -ItemType Directory -Force | Out-Null
+}
 Start-Transcript -Path $LogPath -Append
 
 Write-Output "========================================="
@@ -177,8 +195,9 @@ Write-Output "SnoozeInterval: $SnoozeInterval"
 Write-Output "Timestamp: $(Get-Date -Format 's')"
 Write-Output "========================================="
 
-# Registry path for this toast instance
-$RegPath = "HKLM:\SOFTWARE\ToastNotification\$ToastGUID"
+# Registry path for this toast instance (dynamic based on deployment)
+$RegPath = "${RegistryHive}:\${RegistryPath}\$ToastGUID"
+Write-Output "Using registry path: $RegPath"
 
 try {
     # Read current state from registry
@@ -252,9 +271,44 @@ try {
 
     # Update registry with new state
     Write-Output "Updating registry..."
-    Set-ItemProperty -Path $RegPath -Name "SnoozeCount" -Value $NewSnoozeCount
-    Set-ItemProperty -Path $RegPath -Name "LastShown" -Value (Get-Date).ToString('s')
-    Set-ItemProperty -Path $RegPath -Name "LastSnoozeInterval" -Value $SnoozeInterval
+    try {
+        Set-ItemProperty -Path $RegPath -Name "SnoozeCount" -Value $NewSnoozeCount -ErrorAction Stop
+        Set-ItemProperty -Path $RegPath -Name "LastShown" -Value (Get-Date).ToString('s') -ErrorAction Stop
+        Set-ItemProperty -Path $RegPath -Name "LastSnoozeInterval" -Value $SnoozeInterval -ErrorAction Stop
+    }
+    catch [System.UnauthorizedAccessException] {
+        Write-Error "========================================"
+        Write-Error "ACCESS DENIED - Registry Write Failed"
+        Write-Error "========================================"
+        Write-Error ""
+        Write-Error "This error indicates incorrect deployment or GPO restrictions."
+        Write-Error ""
+        Write-Error "SOLUTIONS:"
+        Write-Error "1. Re-deploy Toast_Notify.ps1 as SYSTEM with -EnableProgressive"
+        Write-Error "   This will automatically grant necessary permissions to BUILTIN\Users"
+        Write-Error ""
+        Write-Error "2. Deploy with -RegistryHive HKCU for per-user state (no permissions needed)"
+        Write-Error "   Example: Toast_Notify.ps1 -EnableProgressive -RegistryHive HKCU"
+        Write-Error ""
+        Write-Error "3. Manually grant permissions (PowerShell as Admin):"
+        Write-Error "   `$Path = '$RegPath'"
+        Write-Error "   `$Acl = Get-Acl -Path `$Path"
+        Write-Error "   `$Rule = New-Object System.Security.AccessControl.RegistryAccessRule('BUILTIN\Users', 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')"
+        Write-Error "   `$Acl.AddAccessRule(`$Rule)"
+        Write-Error "   Set-Acl -Path `$Path -AclObject `$Acl"
+        Write-Error ""
+        Write-Error "Registry Path: $RegPath"
+        Write-Error "Current User: $env:USERNAME"
+        Write-Error "Current Context: USER (not SYSTEM)"
+        Write-Error "========================================"
+        Stop-Transcript
+        exit 1
+    }
+    catch {
+        Write-Error "Failed to update registry: $($_.Exception.Message)"
+        Stop-Transcript
+        exit 1
+    }
 
     # Verify registry write succeeded
     $Verify = Get-ItemProperty -Path $RegPath -ErrorAction Stop

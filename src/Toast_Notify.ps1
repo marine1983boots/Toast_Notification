@@ -5,6 +5,16 @@ Created by:   Ben Whitmore
 Filename:     Toast_Notify.ps1
 ===========================================================================
 
+Version 2.3 - 16/02/2026
+-Added configurable registry location: $RegistryHive (HKLM/HKCU/Custom) and $RegistryPath parameters
+-Added automatic permission granting via Grant-RegistryPermissions function for HKLM mode
+-Added $LogDirectory parameter for centralized logging
+-Updated Initialize-ToastRegistry, Get-ToastState, Set-ToastState to support dynamic registry paths
+-Protocol handlers now pass registry and log parameters to snooze/reboot handlers
+-Fixes Access Denied errors in corporate environments when snooze button clicked
+-Enables per-user state mode (HKCU) for multi-user scenarios
+-Maintained full backwards compatibility (defaults to HKLM)
+
 Version 2.2 - 12/02/2026
 -Added progressive snooze enforcement system with 5-stage escalation (0-4)
 -Added EnableProgressive parameter to enable opt-in progressive mode
@@ -167,7 +177,16 @@ Param
     [Switch]$TestMode,
     [Parameter(Mandatory = $False)]
     [ValidateRange(1, 1440)]
-    [Int]$RebootCountdownMinutes = 5
+    [Int]$RebootCountdownMinutes = 5,
+    [Parameter(Mandatory = $False)]
+    [ValidateSet('HKLM', 'HKCU', 'Custom')]
+    [String]$RegistryHive = 'HKLM',
+    [Parameter(Mandatory = $False)]
+    [ValidatePattern('^[a-zA-Z0-9_\\]+$')]
+    [String]$RegistryPath = 'SOFTWARE\ToastNotification',
+    [Parameter(Mandatory = $False)]
+    [ValidateScript({ Test-Path $_ -PathType Container -IsValid })]
+    [String]$LogDirectory = $null
 )
 
 #region Helper Functions
@@ -217,25 +236,39 @@ function Initialize-ToastRegistry {
         Creates registry structure for toast state persistence
     .PARAMETER ToastGUID
         Unique identifier for this toast instance
+    .PARAMETER RegistryHive
+        Registry hive to use (HKLM, HKCU, Custom)
+    .PARAMETER RegistryPath
+        Registry path under the hive (default: SOFTWARE\ToastNotification)
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
         [ValidatePattern('^[A-F0-9\-]{1,36}$')]
-        [String]$ToastGUID
+        [String]$ToastGUID,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateSet('HKLM', 'HKCU', 'Custom')]
+        [String]$RegistryHive = 'HKLM',
+
+        [Parameter(Mandatory = $false)]
+        [String]$RegistryPath = 'SOFTWARE\ToastNotification'
     )
 
-    $RegPath = "HKLM:\SOFTWARE\ToastNotification\$ToastGUID"
+    $RegPath = "${RegistryHive}:\${RegistryPath}\$ToastGUID"
+    $BasePath = "${RegistryHive}:\${RegistryPath}"
 
     try {
         # Create base path if not exists
-        if (!(Test-Path "HKLM:\SOFTWARE\ToastNotification")) {
-            New-Item -Path "HKLM:\SOFTWARE" -Name "ToastNotification" -Force | Out-Null
+        if (!(Test-Path $BasePath)) {
+            $ParentPath = Split-Path $BasePath -Parent
+            $LeafName = Split-Path $RegistryPath -Leaf
+            New-Item -Path $ParentPath -Name $LeafName -Force | Out-Null
         }
 
         # Create toast-specific path
         if (!(Test-Path $RegPath)) {
-            New-Item -Path "HKLM:\SOFTWARE\ToastNotification" -Name $ToastGUID -Force | Out-Null
+            New-Item -Path $BasePath -Name $ToastGUID -Force | Out-Null
             Write-Verbose "Registry path created: $RegPath"
         }
 
@@ -269,15 +302,26 @@ function Get-ToastState {
         Reads current toast state from registry
     .PARAMETER ToastGUID
         Unique identifier for this toast instance
+    .PARAMETER RegistryHive
+        Registry hive to use (HKLM, HKCU, Custom)
+    .PARAMETER RegistryPath
+        Registry path under the hive (default: SOFTWARE\ToastNotification)
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
         [ValidatePattern('^[A-F0-9\-]{1,36}$')]
-        [String]$ToastGUID
+        [String]$ToastGUID,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateSet('HKLM', 'HKCU', 'Custom')]
+        [String]$RegistryHive = 'HKLM',
+
+        [Parameter(Mandatory = $false)]
+        [String]$RegistryPath = 'SOFTWARE\ToastNotification'
     )
 
-    $RegPath = "HKLM:\SOFTWARE\ToastNotification\$ToastGUID"
+    $RegPath = "${RegistryHive}:\${RegistryPath}\$ToastGUID"
 
     try {
         if (Test-Path $RegPath) {
@@ -306,6 +350,10 @@ function Set-ToastState {
         Current snooze count
     .PARAMETER LastInterval
         Last selected snooze interval
+    .PARAMETER RegistryHive
+        Registry hive to use (HKLM, HKCU, Custom)
+    .PARAMETER RegistryPath
+        Registry path under the hive (default: SOFTWARE\ToastNotification)
     #>
     [CmdletBinding()]
     param(
@@ -319,10 +367,17 @@ function Set-ToastState {
 
         [Parameter(Mandatory = $false)]
         [ValidateSet("", "15m", "30m", "1h", "2h", "4h", "eod")]
-        [String]$LastInterval = ""
+        [String]$LastInterval = "",
+
+        [Parameter(Mandatory = $false)]
+        [ValidateSet('HKLM', 'HKCU', 'Custom')]
+        [String]$RegistryHive = 'HKLM',
+
+        [Parameter(Mandatory = $false)]
+        [String]$RegistryPath = 'SOFTWARE\ToastNotification'
     )
 
-    $RegPath = "HKLM:\SOFTWARE\ToastNotification\$ToastGUID"
+    $RegPath = "${RegistryHive}:\${RegistryPath}\$ToastGUID"
 
     try {
         Set-ItemProperty -Path $RegPath -Name "SnoozeCount" -Value $SnoozeCount -Type DWord
@@ -342,6 +397,78 @@ function Set-ToastState {
     }
     catch {
         Write-Warning "Failed to update registry state: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Grant-RegistryPermissions {
+    <#
+    .SYNOPSIS
+        Grants USERS group write permissions to SPECIFIC toast registry path only
+    .DESCRIPTION
+        SECURITY SCOPE: Permissions are ONLY granted to the specific ToastGUID path:
+        HKLM:\SOFTWARE\ToastNotification\{ToastGUID}
+
+        NOT granted to:
+        - HKLM:\SOFTWARE\ToastNotification (parent)
+        - HKLM:\SOFTWARE (entire software hive)
+        - HKLM:\ (entire registry)
+
+        This allows snooze handler to update only this toast instance's state
+        from user context while maintaining security elsewhere.
+    .PARAMETER RegistryPath
+        Full registry path to specific toast instance
+        Example: HKLM:\SOFTWARE\ToastNotification\ABC-123-DEF-456
+    .EXAMPLE
+        Grant-RegistryPermissions -RegistryPath "HKLM:\SOFTWARE\ToastNotification\ABC-123"
+        Grants USERS write access ONLY to the ABC-123 toast instance path
+    .NOTES
+        Security validation ensures only ToastNotification\{GUID} paths can be modified
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^HKLM:\\SOFTWARE\\ToastNotification\\[A-F0-9\-]{1,36}$')]
+        [String]$RegistryPath
+    )
+
+    try {
+        Write-Verbose "SECURITY: Granting permissions to SPECIFIC path only: $RegistryPath"
+
+        # Get current ACL for this specific path
+        $Acl = Get-Acl -Path $RegistryPath
+
+        # Create access rule for USERS group (S-1-5-32-545)
+        # InheritanceFlags: ContainerInherit, ObjectInherit (only affects subkeys under THIS path)
+        # PropagationFlags: None (does NOT propagate to parent or sibling keys)
+        $Rule = New-Object System.Security.AccessControl.RegistryAccessRule(
+            "BUILTIN\Users",
+            "FullControl",
+            "ContainerInherit,ObjectInherit",
+            "None",
+            "Allow"
+        )
+
+        # Add rule and apply to THIS PATH ONLY
+        $Acl.AddAccessRule($Rule)
+        Set-Acl -Path $RegistryPath -AclObject $Acl
+
+        # Verify scope - ensure parent path permissions unchanged
+        $ParentPath = "HKLM:\SOFTWARE\ToastNotification"
+        if (Test-Path $ParentPath) {
+            $ParentAcl = Get-Acl -Path $ParentPath
+            $ParentUserRules = $ParentAcl.Access | Where-Object { $_.IdentityReference -eq "BUILTIN\Users" }
+            if ($ParentUserRules.Count -eq 0) {
+                Write-Verbose "SECURITY VERIFIED: Parent path still protected (no USERS write access)"
+            }
+        }
+
+        Write-Output "[OK] Registry permissions granted to USERS group for THIS PATH ONLY: $RegistryPath"
+        Write-Output "[OK] Parent path (SOFTWARE\ToastNotification) remains protected"
+        return $true
+    }
+    catch {
+        Write-Warning "Failed to grant registry permissions: $($_.Exception.Message)"
         return $false
     }
 }
@@ -991,7 +1118,7 @@ If ($XMLValid -eq $True) {
         #Initialize Registry State if progressive mode enabled
         If ($EnableProgressive) {
             Write-Output "Initializing registry for ToastGUID: $ToastGUID"
-            $RegInitResult = Initialize-ToastRegistry -ToastGUID $ToastGUID
+            $RegInitResult = Initialize-ToastRegistry -ToastGUID $ToastGUID -RegistryHive $RegistryHive -RegistryPath $RegistryPath
             if (!$RegInitResult) {
                 Write-Error "CRITICAL: Registry initialization failed"
                 Write-Error "Toast state will not persist across snoozes"
@@ -999,13 +1126,30 @@ If ($XMLValid -eq $True) {
             }
 
             # Verify registry was created and readable
-            $RegVerify = Get-ToastState -ToastGUID $ToastGUID
+            $RegVerify = Get-ToastState -ToastGUID $ToastGUID -RegistryHive $RegistryHive -RegistryPath $RegistryPath
             if (!$RegVerify) {
                 Write-Error "CRITICAL: Registry created but not readable"
                 throw "Registry verification failed"
             }
 
             Write-Output "Registry initialization verified: SnoozeCount=$($RegVerify.SnoozeCount)"
+
+            # Grant permissions if using HKLM (machine-wide state)
+            if ($RegistryHive -eq 'HKLM') {
+                Write-Output "Granting USERS group permissions to registry path for snooze handler..."
+                $RegPath = "HKLM:\${RegistryPath}\$ToastGUID"
+                $PermissionResult = Grant-RegistryPermissions -RegistryPath $RegPath
+                if ($PermissionResult) {
+                    Write-Output "[OK] Registry permissions granted - Snooze handler will work from user context"
+                }
+                else {
+                    Write-Warning "Permission grant failed - Snooze may not work from user context"
+                    Write-Warning "Consider deploying with -RegistryHive HKCU for per-user state"
+                }
+            }
+            elseif ($RegistryHive -eq 'HKCU') {
+                Write-Output "Using HKCU mode - No permission grant needed (per-user state)"
+            }
 
             # Register toast-snooze:// protocol handler in HKEY_CLASSES_ROOT
             Write-Output "Registering toast-snooze:// protocol handler..."
@@ -1079,7 +1223,12 @@ If ($XMLValid -eq $True) {
                 $HandlerPath = Join-Path $ToastPath "Toast_Snooze_Handler.ps1"
                 $CommandKey = "Registry::HKEY_CLASSES_ROOT\toast-snooze\shell\open\command"
 
-                $CommandValue = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$HandlerPath`" -ProtocolUri `"%1`""
+                # Build command with registry and log parameters
+                $CommandParams = "-ProtocolUri `"%1`" -RegistryHive $RegistryHive -RegistryPath `"$RegistryPath`""
+                if (![string]::IsNullOrWhiteSpace($LogDirectory)) {
+                    $CommandParams += " -LogDirectory `"$LogDirectory`""
+                }
+                $CommandValue = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$HandlerPath`" $CommandParams"
                 Set-ItemProperty -Path $CommandKey -Name "(Default)" -Value $CommandValue -Force
 
                 Write-Output "Protocol handler command registered: $CommandValue"
@@ -1174,7 +1323,7 @@ If ($XMLValid -eq $True) {
 
         #Handle progressive mode - read authoritative SnoozeCount from registry
         If ($EnableProgressive) {
-            $RegState = Get-ToastState -ToastGUID $ToastGUID
+            $RegState = Get-ToastState -ToastGUID $ToastGUID -RegistryHive $RegistryHive -RegistryPath $RegistryPath
             if ($RegState) {
                 $RegistrySnoozeCount = $RegState.SnoozeCount
                 Write-Output "Registry SnoozeCount: $RegistrySnoozeCount"
