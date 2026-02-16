@@ -598,10 +598,11 @@ function Initialize-ToastFolderStructure {
             }
         }
 
-        Write-Output "[OK] Folder structure created: $($Paths.Base)"
-        Write-Output "[OK]   - Logs:    $($Paths.Logs)"
-        Write-Output "[OK]   - Scripts: $($Paths.Scripts)"
+        Write-Verbose "Folder structure created: $($Paths.Base)"
+        Write-Verbose "  - Logs:    $($Paths.Logs)"
+        Write-Verbose "  - Scripts: $($Paths.Scripts)"
 
+        # Return only the hashtable (no Write-Output to avoid array return)
         return $Paths
     }
     catch {
