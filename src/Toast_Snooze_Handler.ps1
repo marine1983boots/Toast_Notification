@@ -200,6 +200,8 @@ $RegPath = "${RegistryHive}:\${RegistryPath}\$ToastGUID"
 Write-Output "Using registry path: $RegPath"
 
 try {
+    $ErrorActionPreference = 'Stop'
+
     # Read current state from registry
     Write-Output "Reading current state from registry..."
     if (!(Test-Path $RegPath)) {
@@ -379,7 +381,47 @@ try {
         -Settings $Task_Settings
 
     # Register task
-    Register-ScheduledTask -TaskName $TaskName -InputObject $New_Task -Force | Out-Null
+    try {
+        Register-ScheduledTask -TaskName $TaskName -InputObject $New_Task -Force -ErrorAction Stop | Out-Null
+    }
+    catch [System.UnauthorizedAccessException] {
+        Write-Error "========================================"
+        Write-Error "ACCESS DENIED - Scheduled Task Registration Failed"
+        Write-Error "========================================"
+        Write-Error ""
+        Write-Error "This error indicates insufficient permissions to register scheduled tasks."
+        Write-Error ""
+        Write-Error "SOLUTIONS:"
+        Write-Error "1. Initial deployment should run as SYSTEM to register protocol handler"
+        Write-Error "   This grants necessary permissions for subsequent USER context invocations"
+        Write-Error ""
+        Write-Error "2. If deployed correctly, check Group Policy restrictions:"
+        Write-Error "   - Computer Configuration > Windows Settings > Security Settings"
+        Write-Error "   - Local Policies > User Rights Assignment > Create scheduled tasks"
+        Write-Error "   - Verify BUILTIN\Users has this right"
+        Write-Error ""
+        Write-Error "3. Alternative: Use current user principal (if supported by your environment):"
+        Write-Error "   Modify line 366 to:"
+        Write-Error "   `$Task_Principal = New-ScheduledTaskPrincipal -UserId `$env:USERNAME"
+        Write-Error ""
+        Write-Error "4. Manual permission grant (PowerShell as Admin):"
+        Write-Error "   schtasks /create /tn ""$TaskName"" /tr ""powershell.exe"" /sc once /st 00:00 /ru ""`$env:USERDOMAIN\`$env:USERNAME"""
+        Write-Error "   (Note: For local users, use: /ru ""`$env:COMPUTERNAME\`$env:USERNAME"")"
+        Write-Error ""
+        Write-Error "Task Name: $TaskName"
+        Write-Error "Current User: $env:USERNAME"
+        Write-Error "Current Context: USER (not SYSTEM)"
+        Write-Error "========================================"
+        Stop-Transcript
+        exit 1
+    }
+    catch {
+        Write-Error "Failed to register scheduled task: $($_.Exception.Message)"
+        Write-Error "Task Name: $TaskName"
+        Write-Error "Error Type: $($_.Exception.GetType().FullName)"
+        Stop-Transcript
+        exit 1
+    }
 
     Write-Output "Scheduled task created successfully: $TaskName"
     Write-Output "Task will trigger at: $($NextTrigger.ToString('s'))"
