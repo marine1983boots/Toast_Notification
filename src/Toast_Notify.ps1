@@ -475,7 +475,7 @@ function Initialize-SnoozeTasks {
             $SuccessCount++
         }
         catch {
-            Write-Warning "  Failed to pre-create task $TaskName: $($_.Exception.Message)"
+            Write-Warning "  Failed to pre-create task ${TaskName}: $($_.Exception.Message)"
         }
     }
 
