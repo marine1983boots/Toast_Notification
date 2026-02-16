@@ -5,6 +5,13 @@ Created by:   Ben Whitmore
 Filename:     Toast_Notify.ps1
 ===========================================================================
 
+Version 2.8 - 16/02/2026
+-DIAGNOSTIC: Disabled fallback notification for clean failure analysis
+-Removed Show-FallbackNotification call when toast display fails
+-Now fails cleanly with detailed error logging (type, HRESULT code)
+-Prevents confusion from seeing default BIOS XML instead of expected failure
+-Logs failures to HKLM:\SOFTWARE\ToastNotification\Failures for IT monitoring
+
 Version 2.7 - 16/02/2026
 -COMPATIBILITY FIX: Removed DeleteExpiredTaskAfter parameter from main toast task settings (line 1679)
 -Resolves "task XML incorrectly formatted" error (0x8004131F) on corporate machines
@@ -2223,57 +2230,34 @@ If ($XMLValid -eq $True) {
             }
         }
         catch {
-            # Toast display failed - use fallback
+            # Toast display failed - NO FALLBACK (fail cleanly for debugging)
             $ToastDisplaySucceeded = $false
             $ErrorDetails = $_.Exception.Message
 
-            Write-Warning "========================================="
-            Write-Warning "[TOAST DISPLAY FAILED]"
-            Write-Warning "Error: $ErrorDetails"
-            Write-Warning "========================================="
-
-            # Prepare fallback notification
-            $FallbackTitle = if ($Priority) { "[URGENT] $EventTitle" } else { $EventTitle }
-            $FallbackMessage = @"
-$EventText
-
-Action Required: $ButtonTitle
-
-This notification could not be displayed as a toast due to corporate environment restrictions.
-
-Technical Details: $ErrorDetails
-"@
-
-            $FallbackSeverity = if ($Priority -or $ToastScenario -eq 'alarm') { 'Warning' } else { 'Information' }
-
-            # Attempt fallback
-            Write-Output "Attempting fallback notification method..."
-            $FallbackResult = Show-FallbackNotification -Title $FallbackTitle -Message $FallbackMessage -Method Auto -Severity $FallbackSeverity
-
-            if ($FallbackResult) {
-                Write-Output "[OK] Fallback notification displayed successfully"
-
-                # Log fallback usage for IT monitoring
-                try {
-                    $FallbackLogPath = "HKLM:\SOFTWARE\ToastNotification\FallbackUsage"
-                    if (-not (Test-Path $FallbackLogPath)) {
-                        New-Item -Path $FallbackLogPath -Force | Out-Null
-                    }
-
-                    $FallbackCount = (Get-ItemProperty -Path $FallbackLogPath -Name "Count" -ErrorAction SilentlyContinue).Count
-                    if ($null -eq $FallbackCount) { $FallbackCount = 0 }
-                    $FallbackCount++
-
-                    Set-ItemProperty -Path $FallbackLogPath -Name "Count" -Value $FallbackCount -Type DWord -Force
-                    Set-ItemProperty -Path $FallbackLogPath -Name "LastFallback" -Value (Get-Date).ToString('s') -Type String -Force
-                    Set-ItemProperty -Path $FallbackLogPath -Name "LastError" -Value $ErrorDetails -Type String -Force
-                }
-                catch {
-                    Write-Verbose "Could not log fallback usage: $($_.Exception.Message)"
-                }
+            Write-Error "========================================="
+            Write-Error "[TOAST DISPLAY FAILED]"
+            Write-Error "Error: $ErrorDetails"
+            Write-Error "Error Type: $($_.Exception.GetType().FullName)"
+            if ($_.Exception.HResult) {
+                Write-Error "Error Code (HRESULT): 0x$($_.Exception.HResult.ToString('X8'))"
             }
-            else {
-                Write-Error "Fallback notification also failed - user was not notified"
+            Write-Error "========================================="
+            Write-Error "Fallback notification disabled for clean failure analysis"
+            Write-Error "Check log file for detailed diagnostics"
+
+            # Log the failure but don't show fallback notification
+            try {
+                $FailureLogPath = "HKLM:\SOFTWARE\ToastNotification\Failures"
+                if (-not (Test-Path $FailureLogPath)) {
+                    New-Item -Path $FailureLogPath -Force | Out-Null
+                }
+
+                Set-ItemProperty -Path $FailureLogPath -Name "LastFailure" -Value (Get-Date).ToString('s') -Type String -Force
+                Set-ItemProperty -Path $FailureLogPath -Name "LastError" -Value $ErrorDetails -Type String -Force
+                Set-ItemProperty -Path $FailureLogPath -Name "LastErrorType" -Value $_.Exception.GetType().FullName -Type String -Force
+            }
+            catch {
+                Write-Verbose "Could not log failure: $($_.Exception.Message)"
             }
         }
         finally {
