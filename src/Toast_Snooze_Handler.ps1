@@ -5,6 +5,13 @@ Created by:   Ben Whitmore (with AI assistance)
 Filename:     Toast_Snooze_Handler.ps1
 ===========================================================================
 
+Version 1.5.2 - 16/02/2026
+-COMPATIBILITY FIX: Removed DeleteExpiredTaskAfter parameter from task settings
+-Resolves "task XML incorrectly formatted" error (0x8004131F) on corporate machines
+-EndBoundary on trigger already prevents execution after expiry (no deletion needed)
+-Pre-created tasks now persist (disabled after use) instead of auto-deleting
+-Improves compatibility across Windows versions and GPO configurations
+
 Version 1.5.1 - 16/02/2026
 -ENHANCEMENT: Added task cleanup to prevent snooze task accumulation
 -Disables previous snooze task before enabling next task
@@ -424,10 +431,9 @@ try {
         $Task_Trigger = New-ScheduledTaskTrigger -Once -At $NextTrigger
         $Task_Trigger.EndBoundary = $Task_Expiry
 
-        # Update task settings (add expiry deletion)
+        # Update task settings
         $Task_Settings = New-ScheduledTaskSettingsSet `
             -Compatibility V1 `
-            -DeleteExpiredTaskAfter (New-TimeSpan -Seconds 600) `
             -AllowStartIfOnBatteries `
             -DontStopIfGoingOnBatteries
 

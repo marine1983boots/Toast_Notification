@@ -5,6 +5,13 @@ Created by:   Ben Whitmore
 Filename:     Toast_Notify.ps1
 ===========================================================================
 
+Version 2.7 - 16/02/2026
+-COMPATIBILITY FIX: Removed DeleteExpiredTaskAfter parameter from main toast task settings (line 1679)
+-Resolves "task XML incorrectly formatted" error (0x8004131F) on corporate machines
+-EndBoundary on trigger already prevents execution after expiry (no deletion needed)
+-Added DontStopIfGoingOnBatteries for consistency with other task configurations
+-Improves compatibility across Windows versions and GPO configurations
+
 Version 2.6 - 16/02/2026
 -CRITICAL FIX: Pre-create scheduled tasks during SYSTEM deployment (enterprise solution)
 -Added Initialize-SnoozeTasks function to create 4 disabled snooze tasks during initial deployment
@@ -1676,7 +1683,7 @@ If ($XMLValid -eq $True) {
         $Task_Trigger = New-ScheduledTaskTrigger -Once -At $Task_TimeToRun
         $Task_Trigger.EndBoundary = $Task_Expiry
         $Task_Principal = New-ScheduledTaskPrincipal -GroupId "S-1-5-32-545" -RunLevel Limited
-        $Task_Settings = New-ScheduledTaskSettingsSet -Compatibility V1 -DeleteExpiredTaskAfter (New-TimeSpan -Seconds 600) -AllowStartIfOnBatteries
+        $Task_Settings = New-ScheduledTaskSettingsSet -Compatibility V1 -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
         $New_Task = New-ScheduledTask -Description "Toast_Notification_$($ToastGuid) Task for user notification. Title: $($EventTitle) :: Event:$($EventText) :: Source Path: $($ToastPath) " -Action $Task_Action -Principal $Task_Principal -Trigger $Task_Trigger -Settings $Task_Settings
         Register-ScheduledTask -TaskName "Toast_Notification_$($ToastGuid)" -InputObject $New_Task
     }
