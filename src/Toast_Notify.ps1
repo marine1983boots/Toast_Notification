@@ -5,6 +5,23 @@ Created by:   Ben Whitmore
 Filename:     Toast_Notify.ps1
 ===========================================================================
 
+Version 2.4 - 16/02/2026
+-Added $WorkingDirectory parameter for customizable base directory location (default: C:\ProgramData\ToastNotification)
+-Added $Dismiss switch parameter to control dismiss (X) button visibility (default: hidden, forces user engagement)
+-Added Initialize-ToastFolderStructure function to create organized folder layout per toast instance
+-Added Remove-StaleToastFolders function with automatic cleanup to prevent bloat
+-Added $CleanupDaysThreshold parameter to control automatic folder cleanup (default: 30 days)
+-Removed $LogDirectory parameter (simplified: logs always go to WorkingDirectory\{GUID}\Logs\)
+-Standardized folder structure: WorkingDirectory\{ToastGUID}\Logs\ and Scripts\ subfolders
+-Handler scripts staged to Scripts\ subfolder (working copies isolated per toast instance)
+-All logs (Toast_Notify, handlers) collated in Logs\ subfolder for centralized IT monitoring
+-Protocol handlers automatically receive correct Logs\ path
+-Dismiss button control: Default hides dismiss (X) button to enforce action selection, -Dismiss switch shows it
+-Automatic cleanup: Stale toast folders removed after threshold days (prevents accumulation)
+-Easy manual cleanup: Delete entire ToastGUID folder to remove all toast files
+-Changed default location: C:\ProgramData\ToastNotification\{GUID} (was: C:\Windows\Temp\{GUID})
+-Maintained full backwards compatibility
+
 Version 2.3 - 16/02/2026
 -Added configurable registry location: $RegistryHive (HKLM/HKCU/Custom) and $RegistryPath parameters
 -Added automatic permission granting via Grant-RegistryPermissions function for HKLM mode
@@ -126,6 +143,40 @@ Composite switch that enables maximum visibility for critical alerts.
 Combines: Priority=High + ToastScenario=alarm + ensures action buttons.
 Default: $false
 
+.PARAMETER RegistryHive
+Registry hive for storing toast state: HKLM (machine-wide, default), HKCU (per-user), or Custom.
+HKLM requires Grant-RegistryPermissions for user access.
+HKCU provides per-user state with no elevation required.
+Default: HKLM
+
+.PARAMETER RegistryPath
+Custom registry path under the specified hive.
+Default: SOFTWARE\ToastNotification
+
+.PARAMETER WorkingDirectory
+Base directory for toast file structure. Creates organized layout with automatic subfolders:
+- {ToastGUID}\Logs\ - All transcript logs from Toast_Notify and handlers
+- {ToastGUID}\Scripts\ - Staged working copies of handler scripts
+Default: C:\ProgramData\ToastNotification
+Prevents bloat: Old toast folders automatically cleaned up after CleanupDaysThreshold days.
+
+.PARAMETER CleanupDaysThreshold
+Number of days before stale toast folders are automatically removed.
+Prevents accumulation of old toast instances in working directory.
+Default: 30 days
+
+.PARAMETER Dismiss
+Enable dismiss (X) button in top-right corner of toast notification.
+Default behavior (without this switch): Dismiss button HIDDEN - forces user to choose action (snooze/reboot).
+With this switch: Dismiss button VISIBLE - allows user to close notification without action.
+
+Use cases:
+- Default (no -Dismiss): Progressive enforcement, critical updates, ensures user engagement
+- With -Dismiss: Informational toasts, testing, optional notifications
+
+IMPORTANT: Stage 4 (final warning) should NEVER use -Dismiss to enforce reboot decision.
+Default: $false (dismiss button hidden)
+
 .EXAMPLE
 Toast_Notify.ps1 -XMLSource "PhoneSystemProblems.xml"
 
@@ -149,6 +200,26 @@ Maximum visibility mode for critical notifications
 .EXAMPLE
 Toast_Notify.ps1 -EnableProgressive -SnoozeCount 2 -ToastGUID "ABC123"
 Displays Stage 2 toast (2 of 4 snoozes used) for specified GUID
+
+.EXAMPLE
+Toast_Notify.ps1 -EnableProgressive -RegistryHive HKCU
+Per-user toast state stored in HKCU (no elevation required)
+
+.EXAMPLE
+Toast_Notify.ps1 -EnableProgressive -WorkingDirectory "D:\CustomToasts"
+Custom working directory with organized folder structure: D:\CustomToasts\{GUID}\Logs\ and Scripts\
+
+.EXAMPLE
+Toast_Notify.ps1 -EnableProgressive -WorkingDirectory "C:\ProgramData\Notifications" -CleanupDaysThreshold 7
+Custom location with aggressive cleanup (removes toast folders older than 7 days)
+
+.EXAMPLE
+Toast_Notify.ps1 -Dismiss -XMLSource "InformationalMessage.xml"
+Informational toast with dismiss button visible (user can close without action)
+
+.EXAMPLE
+Toast_Notify.ps1 -EnableProgressive
+Progressive enforcement without dismiss button (forces user to snooze or reboot)
 #>
 
 [CmdletBinding()]
@@ -185,8 +256,17 @@ Param
     [ValidatePattern('^[a-zA-Z0-9_\\]+$')]
     [String]$RegistryPath = 'SOFTWARE\ToastNotification',
     [Parameter(Mandatory = $False)]
-    [ValidateScript({ Test-Path $_ -PathType Container -IsValid })]
-    [String]$LogDirectory = $null
+    [ValidateScript({
+        if ([string]::IsNullOrWhiteSpace($_)) { return $true }
+        if ($_ -match '^[a-zA-Z]:\\.*$' -or $_ -match '^\\\\\w+\\.*$') { return $true }
+        throw "Invalid path format. Use local (C:\path) or UNC (\\server\share) paths only."
+    })]
+    [String]$WorkingDirectory = $null,
+    [Parameter(Mandatory = $False)]
+    [ValidateRange(1, 365)]
+    [Int]$CleanupDaysThreshold = 30,
+    [Parameter(Mandatory = $False)]
+    [Switch]$Dismiss = $false
 )
 
 #region Helper Functions
@@ -470,6 +550,149 @@ function Grant-RegistryPermissions {
     catch {
         Write-Warning "Failed to grant registry permissions: $($_.Exception.Message)"
         return $false
+    }
+}
+
+function Initialize-ToastFolderStructure {
+    <#
+    .SYNOPSIS
+        Creates standardized folder structure for toast operations
+    .DESCRIPTION
+        Establishes consistent directory layout:
+        BaseDirectory\
+        ├── Logs\           (transcript logs from all components)
+        ├── Scripts\        (staged working copies of handlers)
+        └── (future: Registry backups)
+    .PARAMETER BaseDirectory
+        Root directory for toast file structure
+        Default: C:\ProgramData\ToastNotification
+    .PARAMETER ToastGUID
+        Toast instance GUID for unique path
+    .EXAMPLE
+        Initialize-ToastFolderStructure -BaseDirectory "C:\ProgramData\ToastNotification" -ToastGUID "ABC-123"
+        Creates: C:\ProgramData\ToastNotification\ABC-123\Logs\ and Scripts\ subdirectories
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [String]$BaseDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^[A-F0-9\-]{1,36}$')]
+        [String]$ToastGUID
+    )
+
+    try {
+        # Create base directory structure
+        $Paths = @{
+            Base    = Join-Path $BaseDirectory $ToastGUID
+            Logs    = Join-Path $BaseDirectory $ToastGUID "Logs"
+            Scripts = Join-Path $BaseDirectory $ToastGUID "Scripts"
+        }
+
+        foreach ($PathName in $Paths.Keys) {
+            $Path = $Paths[$PathName]
+            if (!(Test-Path $Path)) {
+                Write-Verbose "Creating directory: $Path"
+                New-Item -Path $Path -ItemType Directory -Force | Out-Null
+            }
+        }
+
+        Write-Output "[OK] Folder structure created: $($Paths.Base)"
+        Write-Output "[OK]   - Logs:    $($Paths.Logs)"
+        Write-Output "[OK]   - Scripts: $($Paths.Scripts)"
+
+        return $Paths
+    }
+    catch {
+        Write-Error "Failed to create folder structure: $($_.Exception.Message)"
+        throw
+    }
+}
+
+function Remove-StaleToastFolders {
+    <#
+    .SYNOPSIS
+        Removes old toast instance folders to prevent bloat
+    .DESCRIPTION
+        Scans the base directory for toast GUID folders and removes those older than
+        the specified threshold. This prevents accumulation of old toast instances.
+
+        Folder age is determined by the most recent file modification time within the folder.
+    .PARAMETER BaseDirectory
+        Root directory containing toast GUID folders
+    .PARAMETER DaysThreshold
+        Remove folders with no file modifications in this many days (default: 30)
+    .EXAMPLE
+        Remove-StaleToastFolders -BaseDirectory "C:\ProgramData\ToastNotification" -DaysThreshold 30
+        Removes toast folders older than 30 days
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [String]$BaseDirectory,
+
+        [Parameter(Mandatory = $false)]
+        [Int]$DaysThreshold = 30
+    )
+
+    try {
+        if (!(Test-Path $BaseDirectory)) {
+            Write-Verbose "Base directory does not exist, skipping cleanup: $BaseDirectory"
+            return
+        }
+
+        $CutoffDate = (Get-Date).AddDays(-$DaysThreshold)
+        Write-Verbose "Cleaning up toast folders older than $CutoffDate"
+
+        # Get all subdirectories (each should be a GUID folder)
+        $ToastFolders = Get-ChildItem -Path $BaseDirectory -Directory -ErrorAction SilentlyContinue
+
+        $RemovedCount = 0
+        foreach ($Folder in $ToastFolders) {
+            try {
+                # Check if folder name looks like a GUID (basic validation)
+                if ($Folder.Name -notmatch '^[A-F0-9\-]{1,36}$') {
+                    Write-Verbose "Skipping non-GUID folder: $($Folder.Name)"
+                    continue
+                }
+
+                # Get most recent file modification time in folder (recursive)
+                $LatestFile = Get-ChildItem -Path $Folder.FullName -File -Recurse -ErrorAction SilentlyContinue |
+                              Sort-Object LastWriteTime -Descending |
+                              Select-Object -First 1
+
+                if ($LatestFile) {
+                    if ($LatestFile.LastWriteTime -lt $CutoffDate) {
+                        Write-Output "[CLEANUP] Removing stale toast folder: $($Folder.Name) (last modified: $($LatestFile.LastWriteTime))"
+                        Remove-Item -Path $Folder.FullName -Recurse -Force -ErrorAction Stop
+                        $RemovedCount++
+                    }
+                }
+                else {
+                    # Empty folder or no files - remove if folder itself is old
+                    if ($Folder.LastWriteTime -lt $CutoffDate) {
+                        Write-Output "[CLEANUP] Removing empty toast folder: $($Folder.Name)"
+                        Remove-Item -Path $Folder.FullName -Recurse -Force -ErrorAction Stop
+                        $RemovedCount++
+                    }
+                }
+            }
+            catch {
+                Write-Warning "Failed to delete toast folder $($Folder.Name): $($_.Exception.Message)"
+                Write-Verbose "This may indicate locked files in: $($Folder.FullName)"
+            }
+        }
+
+        if ($RemovedCount -gt 0) {
+            Write-Output "[OK] Cleanup complete: Removed $RemovedCount stale toast folder(s)"
+        }
+        else {
+            Write-Verbose "No stale folders found for cleanup"
+        }
+    }
+    catch {
+        Write-Warning "Folder cleanup failed: $($_.Exception.Message)"
     }
 }
 
@@ -1061,8 +1284,31 @@ If ($EnableProgressive) {
 $ScriptPath = $MyInvocation.MyCommand.Path
 $CurrentDir = Split-Path $ScriptPath
 
-#Set Toast Path to UserProfile Temp Directory
-$ToastPath = (Join-Path $ENV:Windir "Temp\$($ToastGuid)")
+#Determine base working directory
+if ([string]::IsNullOrWhiteSpace($WorkingDirectory)) {
+    # Default: C:\ProgramData\ToastNotification
+    $BaseDirectory = "C:\ProgramData\ToastNotification"
+}
+else {
+    # Custom working directory
+    $BaseDirectory = $WorkingDirectory
+}
+
+# Cleanup stale toast folders to prevent bloat (runs in SYSTEM context only)
+if (([System.Security.Principal.WindowsIdentity]::GetCurrent()).Name -eq "NT AUTHORITY\SYSTEM") {
+    Remove-StaleToastFolders -BaseDirectory $BaseDirectory -DaysThreshold $CleanupDaysThreshold
+}
+
+# Initialize folder structure for this toast instance
+$FolderStructure = Initialize-ToastFolderStructure -BaseDirectory $BaseDirectory -ToastGUID $ToastGUID
+
+# Set paths for use throughout script
+$ToastPath = $FolderStructure.Scripts  # Scripts staged to Scripts subfolder
+$LogPath = Join-Path $FolderStructure.Logs "Toast_Notify_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+
+Write-Output "[OK] Working directory: $($FolderStructure.Base)"
+Write-Output "[OK] Scripts staged to: $($FolderStructure.Scripts)"
+Write-Output "[OK] Logs saved to: $($FolderStructure.Logs)"
 
 #Validate ToastScenario parameter (defensive check)
 if ($ToastScenario -notin @('alarm', 'urgent', 'reminder', 'default')) {
@@ -1189,11 +1435,11 @@ If ($XMLValid -eq $True) {
             }
         }
 
-        #Prepare to stage Toast Notification Content in %TEMP% Folder
+        #Prepare to stage Toast Notification Content in Scripts subfolder
         Try {
 
-            #Create TEMP folder to stage Toast Notification Content in %TEMP% Folder
-            New-Item $ToastPath -ItemType Directory -Force -ErrorAction Continue | Out-Null
+            # Folder structure already created by Initialize-ToastFolderStructure
+            # $ToastPath now points to Scripts subfolder
 
             # Only copy toast-related files (not Claude workspace files or directories)
             $FileExtensions = @('*.ps1', '*.jpg', '*.xml', '*.png', '*.txt')
@@ -1224,10 +1470,7 @@ If ($XMLValid -eq $True) {
                 $CommandKey = "Registry::HKEY_CLASSES_ROOT\toast-snooze\shell\open\command"
 
                 # Build command with registry and log parameters
-                $CommandParams = "-ProtocolUri `"%1`" -RegistryHive $RegistryHive -RegistryPath `"$RegistryPath`""
-                if (![string]::IsNullOrWhiteSpace($LogDirectory)) {
-                    $CommandParams += " -LogDirectory `"$LogDirectory`""
-                }
+                $CommandParams = "-ProtocolUri `"%1`" -RegistryHive $RegistryHive -RegistryPath `"$RegistryPath`" -LogDirectory `"$($FolderStructure.Logs)`""
                 $CommandValue = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$HandlerPath`" $CommandParams"
                 Set-ItemProperty -Path $CommandKey -Name "(Default)" -Value $CommandValue -Force
 
@@ -1266,9 +1509,10 @@ If ($XMLValid -eq $True) {
                     New-Item -Path "$RebootProtocolKey\shell\open" -Name "command" -Force | Out-Null
                 }
 
-                # Set command to Toast_Reboot_Handler.ps1
+                # Set command to Toast_Reboot_Handler.ps1 with log directory
                 $RebootHandlerPath = Join-Path $ToastPath "Toast_Reboot_Handler.ps1"
-                $RebootCommandValue = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$RebootHandlerPath`" -ProtocolUri `"%1`""
+                $RebootCmdParams = "-ProtocolUri `"%1`" -LogDirectory `"$($FolderStructure.Logs)`""
+                $RebootCommandValue = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$RebootHandlerPath`" $RebootCmdParams"
                 Set-ItemProperty -Path $RebootCommandKey -Name "(Default)" -Value $RebootCommandValue -Force
 
                 Write-Output "toast-reboot:// protocol registered: $RebootCommandValue"
@@ -1547,12 +1791,25 @@ If ($XMLValid -eq $True) {
             }
         }
 
-        #Build toast scenario attribute (omit for default behavior)
-        If ($ToastScenario -eq 'default') {
+        #Build toast scenario attribute (control dismiss button visibility)
+        # Dismiss button behavior:
+        # - scenario="reminder", "alarm", "urgent" → Hides dismiss (X) button (forces user to choose action)
+        # - No scenario attribute or scenario="default" → Shows dismiss (X) button (user can close)
+        If ($Dismiss) {
+            # User explicitly wants dismiss button visible
             $ScenarioAttribute = ''
+            Write-Verbose "Dismiss button enabled (no scenario attribute)"
+        }
+        elseif ($ToastScenario -eq 'default') {
+            # Default scenario shows dismiss button, but we want to hide it unless -Dismiss specified
+            # Change to 'reminder' to hide dismiss while maintaining standard notification behavior
+            $ScenarioAttribute = "scenario=`"reminder`""
+            Write-Verbose "Dismiss button hidden (scenario=reminder)"
         }
         else {
+            # Use specified scenario (alarm, urgent, reminder all hide dismiss button)
             $ScenarioAttribute = "scenario=`"$ToastScenario`""
+            Write-Verbose "Using scenario=$ToastScenario (dismiss button hidden)"
         }
 
         # XML-encode all text variables for safe embedding

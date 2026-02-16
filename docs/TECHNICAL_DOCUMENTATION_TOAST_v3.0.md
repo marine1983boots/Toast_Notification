@@ -2053,47 +2053,160 @@ Set-Acl -Path $CustomPath -AclObject $Acl
 Get-Acl $CustomPath | Format-List
 ```
 
-### 11.3 Log Directory Configuration
+### 11.3 Working Directory and Folder Structure
 
-The `$LogDirectory` parameter controls where log files are written.
+The `$WorkingDirectory` parameter controls the base location for all toast file operations.
 
-**Parameter:** `-LogDirectory "C:\Path\To\Logs"`
+**Parameter:** `-WorkingDirectory "C:\Path\To\Base"`
 
 **Default Behavior:**
-- If not specified: Script staging directory (`$ENV:Windir\Temp\{ToastGUID}`)
-- If specified: Custom directory (created if doesn't exist)
+- Default location: `C:\ProgramData\ToastNotification`
+- Creates organized subfolder structure per toast instance
 
-**Log Files Created:**
-- `Toast_Notify.log` - Main script execution log
-- `{ToastGUID}_Snooze.log` - Snooze handler operations
-- `Toast_Reboot_Handler.log` - Reboot button operations
+**Folder Structure (v2.4+):**
+```
+WorkingDirectory\
+└── {ToastGUID}\
+    ├── Logs\              [All transcript logs]
+    │   ├── Toast_Notify_20260216_143022.log
+    │   ├── Toast_Snooze_Handler_20260216_143530.log
+    │   └── Toast_Reboot_Handler_20260216_144012.log
+    ├── Scripts\           [Staged handler working copies]
+    │   ├── Toast_Snooze_Handler.ps1
+    │   └── Toast_Reboot_Handler.ps1
+    └── (future: Registry backups, state files)
+```
+
+**Benefits:**
+- **Centralized logging:** All logs in one location for IT monitoring tools
+- **Isolated instances:** Each toast GUID has its own folder
+- **Easy cleanup:** Delete entire `{ToastGUID}` folder to remove all files
+- **Automatic bloat prevention:** Stale folders cleaned up after threshold days
+
+**Log Files Created in Logs\ Subfolder:**
+- `Toast_Notify_*.log` - Main script execution log (timestamped)
+- `Toast_Snooze_Handler_*.log` - Snooze handler operations (timestamped)
+- `Toast_Reboot_Handler_*.log` - Reboot button operations (timestamped)
+
+**Automatic Cleanup:**
+```powershell
+# Default: Remove toast folders older than 30 days
+-CleanupDaysThreshold 30
+
+# Aggressive cleanup: Remove after 7 days
+-CleanupDaysThreshold 7
+
+# Disable cleanup: Set to very high value
+-CleanupDaysThreshold 365
+```
+
+**Cleanup Behavior:**
+- Runs automatically during SYSTEM context deployment
+- Checks folder age by most recent file modification time
+- Removes entire `{ToastGUID}` folder (Logs\, Scripts\, all files)
+- Prevents accumulation of old toast instances
 
 **Validation:**
 - Path must be valid Windows path
 - PowerShell validation: `Test-Path $_ -PathType Container -IsValid`
 - Directory created automatically if doesn't exist
+- Subfolders (Logs\, Scripts\) created automatically
 
-**Centralized Logging Example:**
+**Custom Working Directory Example:**
 ```powershell
-# Centralize all toast logs for IT monitoring
+# Use D:\CustomToasts as base location
 powershell.exe -ExecutionPolicy Bypass -File Toast_Notify.ps1 `
     -EnableProgressive `
-    -LogDirectory "C:\ProgramData\Logs\ToastNotifications"
+    -WorkingDirectory "D:\CustomToasts"
+
+# Results in: D:\CustomToasts\{GUID}\Logs\ and Scripts\
 ```
 
-**UNC Path Support:**
+**Corporate Centralized Location:**
 ```powershell
-# Log to network share (ensure permissions)
--LogDirectory "\\FileServer\Logs\ToastNotifications"
+# Centralize all toast instances in IT-monitored location
+-WorkingDirectory "C:\ProgramData\ITServices\Notifications"
 ```
 
-**Per-User Logging:**
+**Network Share (Caution):**
 ```powershell
-# Each user logs to their own profile
--LogDirectory "%APPDATA%\ToastNotifications\Logs"
+# UNC path supported (ensure SYSTEM account has write permissions)
+-WorkingDirectory "\\FileServer\ToastNotifications"
 ```
 
-### 11.4 Corporate Deployment Scenarios
+**Backwards Compatibility:**
+- v2.3 and earlier: Used `$ENV:Windir\Temp\{ToastGUID}` (flat structure)
+- v2.4+: Uses `C:\ProgramData\ToastNotification\{GUID}\` (organized structure)
+- Existing deployments continue working without changes
+
+### 11.4 Dismiss Button Control
+
+The `$Dismiss` parameter controls whether users can dismiss (close) toast notifications without taking action.
+
+**Parameter:** `-Dismiss` (switch, default: $false)
+
+**Dismiss Button Behavior:**
+
+| Scenario | Dismiss Button | User Experience |
+|----------|----------------|-----------------|
+| **Default (no -Dismiss)** | Hidden (X button not shown) | User MUST choose action (snooze/reboot) |
+| **With -Dismiss** | Visible (X button shown) | User can close notification without action |
+
+**XML Scenario Attribute Control:**
+- Without `-Dismiss`: Uses `scenario="reminder"` or configured ToastScenario (hides dismiss button)
+- With `-Dismiss`: Overrides to no scenario attribute (shows dismiss button)
+
+**Use Cases:**
+
+**Default Behavior (Dismiss Hidden):**
+```powershell
+# Progressive enforcement - forces user to engage
+Toast_Notify.ps1 -EnableProgressive -XMLSource "BIOS_Update.xml"
+
+# Critical update - user cannot ignore
+Toast_Notify.ps1 -ToastScenario "alarm" -XMLSource "SecurityPatch.xml"
+```
+
+**With Dismiss Button (Testing/Informational):**
+```powershell
+# Informational message - user can dismiss
+Toast_Notify.ps1 -Dismiss -XMLSource "InformationalMessage.xml"
+
+# Testing toast behavior - quick dismissal
+Toast_Notify.ps1 -Dismiss -XMLSource "TestMessage.xml"
+```
+
+**Progressive Enforcement Pattern:**
+
+Stage 0-3: Dismiss hidden → User must choose snooze or action
+Stage 4 (Final Warning): Dismiss hidden → User MUST reboot (no snooze option)
+
+**CRITICAL: Stage 4 Validation**
+The script automatically enforces that Stage 4 toasts **cannot** have dismiss button enabled.
+Attempting `-Dismiss` with Stage 4 will trigger validation error.
+
+**Why Hide Dismiss by Default:**
+- **Compliance enforcement:** Ensures users don't indefinitely ignore critical updates
+- **Engagement tracking:** User must interact (snooze/action), generating audit trail
+- **Progressive pressure:** Each stage increases urgency, culminating in forced reboot
+- **Corporate governance:** IT policy enforcement without user bypass
+
+**When to Use -Dismiss:**
+- **Testing environments:** Quick iteration without forced engagement
+- **Informational toasts:** Non-critical notifications (announcements, tips)
+- **Optional compliance:** User can legitimately defer (e.g., personal devices)
+
+**Example Deployment Matrix:**
+
+| Toast Type | -Dismiss | Rationale |
+|------------|----------|-----------|
+| BIOS Update | NO | Critical security, must apply |
+| Windows Update | NO | Compliance requirement |
+| Software Notification | YES | Informational only |
+| Training Reminder | YES | Optional engagement |
+| Stage 4 Final Warning | NO | Forced reboot decision |
+
+### 11.5 Corporate Deployment Scenarios
 
 #### Scenario A: SCCM Deployment with HKLM (Recommended)
 
@@ -2112,7 +2225,12 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File Toast_Notify.ps1 `
     -XMLSource "BIOS_Update.xml" `
     -EnableProgressive `
     -RegistryHive HKLM `
-    -LogDirectory "C:\ProgramData\Logs\SCCM\ToastNotifications"
+    -WorkingDirectory "C:\ProgramData\SCCM\ToastNotifications"
+
+# Results in folder structure:
+# C:\ProgramData\SCCM\ToastNotifications\SCCM-BIOS-UPDATE-2024\
+#   ├── Logs\
+#   └── Scripts\
 ```
 
 **Result:**
@@ -2210,7 +2328,7 @@ powershell.exe -ExecutionPolicy Bypass -File Toast_Notify.ps1 `
 3. Ensure network share accessible if using UNC logging path
 4. Test with single machine before broad deployment
 
-### 11.5 Troubleshooting Registry Permission Errors
+### 11.6 Troubleshooting Registry Permission Errors
 
 #### Error: "Access Denied" at Toast_Snooze_Handler.ps1
 
@@ -2292,20 +2410,25 @@ powershell.exe -ExecutionPolicy Bypass -File Toast_Notify.ps1 `
     -RegistryPath "SOFTWARE\YourCompany\Notifications"
 ```
 
-### 11.6 Parameter Reference
+### 11.7 Parameter Reference
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `-RegistryHive` | String | HKLM | Registry hive: HKLM, HKCU, or Custom |
 | `-RegistryPath` | String | SOFTWARE\ToastNotification | Registry path under hive |
-| `-LogDirectory` | String | Script staging dir | Custom log file location |
+| `-WorkingDirectory` | String | C:\ProgramData\ToastNotification | Base directory for folder structure |
+| `-CleanupDaysThreshold` | Int | 30 | Days before stale toast folders removed |
+| `-Dismiss` | Switch | $false | Enable dismiss (X) button visibility |
 
 **Parameter Validation:**
 - `$RegistryHive`: ValidateSet('HKLM', 'HKCU', 'Custom')
 - `$RegistryPath`: ValidatePattern('^[a-zA-Z0-9_\\]+$')
+- `$WorkingDirectory`: ValidateScript({ Test-Path $_ -PathType Container -IsValid })
+- `$CleanupDaysThreshold`: Integer value (days)
+- `$Dismiss`: Boolean switch
 - `$LogDirectory`: ValidateScript({ Test-Path $_ -PathType Container -IsValid })
 
-### 11.7 Security Considerations
+### 11.8 Security Considerations
 
 **Permission Scope:**
 - Permissions granted ONLY to specific ToastGUID registry path
@@ -2331,21 +2454,27 @@ For v2.4, consider reducing permission from FullControl to:
 - `ReadKey` - Read existing values
 - This would be sufficient for snooze handler operations
 
-### 11.8 Backwards Compatibility
+### 11.9 Backwards Compatibility
 
-**Version 2.3 maintains full backwards compatibility:**
-- Default parameters match v2.2 behavior
+**Version 2.4 maintains full backwards compatibility:**
+- Default parameters match v2.3/v2.2 behavior for registry
 - Existing deployments continue working without modification
 - No configuration changes required
 - Registry location unchanged unless explicitly specified
+- **Folder structure change:** v2.4 uses organized structure (WorkingDirectory\{GUID}\Logs\Scripts\) instead of flat temp directory
 
 **Migration Path:**
-- Optional: Re-deploy to grant ACL permissions
+- **v2.3 → v2.4:** Automatic migration to organized folder structure on first run
+- Optional: Re-deploy to grant ACL permissions (if not already done in v2.3)
 - Optional: Switch to HKCU mode for multi-user scenarios
-- Optional: Customize paths per corporate requirements
+- Optional: Customize WorkingDirectory for corporate IT monitoring integration
+- Optional: Adjust CleanupDaysThreshold for bloat prevention
 
 **No Breaking Changes:**
-All new parameters are optional with sensible defaults.
+- All new parameters are optional with sensible defaults
+- Dismiss button default behavior (hidden) matches existing security posture
+- Folder structure change is transparent to end users
+- Old temp folders (C:\Windows\Temp\{GUID}) from v2.3 deployments remain but are not reused
 
 ---
 
