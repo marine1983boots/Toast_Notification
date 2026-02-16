@@ -5,19 +5,10 @@ Created by:   Ben Whitmore
 Filename:     Toast_Notify.ps1
 ===========================================================================
 
-Version 2.9 - 16/02/2026
--COMPLETE REMOVAL: Deleted entire Show-FallbackNotification function and all fallback logic
--Removed all $Script:FallbackReason and $Script:UseForceFailback references
--Removed RecommendedFallback property from Test-CorporateEnvironment
--Script now fails cleanly without confusing fallback notifications
--No more default BIOS XML showing when custom XML should display
-
-Version 2.8 - 16/02/2026
--DIAGNOSTIC: Disabled fallback notification for clean failure analysis
--Removed Show-FallbackNotification call when toast display fails
--Now fails cleanly with detailed error logging (type, HRESULT code)
--Prevents confusion from seeing default BIOS XML instead of expected failure
--Logs failures to HKLM:\SOFTWARE\ToastNotification\Failures for IT monitoring
+Version 2.10 - 16/02/2026
+-CLEANUP: Removed all remaining fallback-related comments and messages
+-Simplified error handling messages for clearer debugging
+-Cleaned up change log entries
 
 Version 2.7 - 16/02/2026
 -COMPATIBILITY FIX: Removed DeleteExpiredTaskAfter parameter from main toast task settings (line 1679)
@@ -913,7 +904,7 @@ function Get-StageDetails {
             $StageConfig.VisualUrgency = "Critical"
         }
         default {
-            # Fallback to Stage 0
+            # Default to Stage 0
             $StageConfig.Stage = 0
             $StageConfig.Scenario = "reminder"
             $StageConfig.SnoozeInterval = "2h"
@@ -964,7 +955,7 @@ function Get-StageEventText {
             return $StageNode.InnerText.Trim()
         }
         else {
-            # Fallback to Stage0 if specific stage node missing
+            # Use Stage0 if specific stage node missing
             Write-Verbose "Stage$StageNumber not found, using Stage0 text from XML"
             return $EventTextNode.Stage0.InnerText.Trim()
         }
@@ -1107,7 +1098,6 @@ function Test-CorporateEnvironment {
         $CorpEnv = Test-CorporateEnvironment
         if ($CorpEnv.IsRestricted) {
             Write-Warning "Restrictions: $($CorpEnv.Restrictions -join ', ')"
-            Write-Warning "Recommended fallback: $($CorpEnv.RecommendedFallback)"
         }
     #>
     [CmdletBinding()]
@@ -1233,9 +1223,6 @@ function Test-WinRTAssemblies {
         return $false
     }
 }
-
-# Show-FallbackNotification function REMOVED for clean failure debugging
-# Fallback notifications were confusing troubleshooting by hiding actual errors
 
 #endregion Helper Functions
 
@@ -2071,7 +2058,7 @@ If ($XMLValid -eq $True) {
             }
         }
         catch {
-            # Toast display failed - NO FALLBACK (fail cleanly for debugging)
+            # Toast display failed
             $ToastDisplaySucceeded = $false
             $ErrorDetails = $_.Exception.Message
 
@@ -2083,10 +2070,9 @@ If ($XMLValid -eq $True) {
                 Write-Error "Error Code (HRESULT): 0x$($_.Exception.HResult.ToString('X8'))"
             }
             Write-Error "========================================="
-            Write-Error "Fallback notification disabled for clean failure analysis"
             Write-Error "Check log file for detailed diagnostics"
 
-            # Log the failure but don't show fallback notification
+            # Log the failure for diagnostics
             try {
                 $FailureLogPath = "HKLM:\SOFTWARE\ToastNotification\Failures"
                 if (-not (Test-Path $FailureLogPath)) {
