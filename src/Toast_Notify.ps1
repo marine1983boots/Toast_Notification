@@ -584,10 +584,11 @@ function Initialize-ToastFolderStructure {
 
     try {
         # Create base directory structure
+        $BasePath = Join-Path $BaseDirectory $ToastGUID
         $Paths = @{
-            Base    = Join-Path $BaseDirectory $ToastGUID
-            Logs    = Join-Path $BaseDirectory $ToastGUID "Logs"
-            Scripts = Join-Path $BaseDirectory $ToastGUID "Scripts"
+            Base    = $BasePath
+            Logs    = Join-Path $BasePath "Logs"
+            Scripts = Join-Path $BasePath "Scripts"
         }
 
         foreach ($PathName in $Paths.Keys) {
