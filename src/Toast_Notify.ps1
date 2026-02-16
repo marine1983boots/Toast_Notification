@@ -5,6 +5,15 @@ Created by:   Ben Whitmore
 Filename:     Toast_Notify.ps1
 ===========================================================================
 
+Version 2.5 - 16/02/2026
+-BLOCKER FIX: Stage 3 (final warning) no longer shows snooze button - forces reboot decision
+-BLOCKER FIX: Unregister-ScheduledTask errors no longer fatal (Register with -Force overwrites anyway)
+-Fixed progressive enforcement logic: Stage 3 is now true final warning (no snooze escape)
+-Snooze button visibility: Stages 0-2 (snooze allowed), Stage 3 (no snooze), Stage 4 (forced reboot)
+-Clarified Stage 3 behavior: User must reboot or dismiss (dismiss advances to Stage 4 on next run)
+-Improved Stage 3 configuration: SnoozeInterval set to empty string, comment explains no-snooze policy
+-Production-critical stability improvements
+
 Version 2.4 - 16/02/2026
 -Added $WorkingDirectory parameter for customizable base directory location (default: C:\ProgramData\ToastNotification)
 -Added $Dismiss switch parameter to control dismiss (X) button visibility (default: hidden, forces user engagement)
@@ -757,10 +766,12 @@ function Get-StageDetails {
             $StageConfig.VisualUrgency = "Normal"
         }
         3 {
+            # Stage 3: FINAL WARNING - No snooze allowed
+            # User must decide: Reboot Now or Dismiss (transitions to Stage 4 on next run)
             $StageConfig.Stage = 3
             $StageConfig.Scenario = "urgent"
-            $StageConfig.SnoozeInterval = "15m"
-            $StageConfig.AllowDismiss = $true
+            $StageConfig.SnoozeInterval = ""  # No snooze at Stage 3 (final warning)
+            $StageConfig.AllowDismiss = $true  # Can dismiss, but next snooze attempt goes to Stage 4
             $StageConfig.AudioLoop = $true
             $StageConfig.VisualUrgency = "Urgent"
         }
@@ -1870,8 +1881,10 @@ If ($XMLValid -eq $True) {
             # Build actions dynamically based on stage
             $ActionsXML = "<toast><actions>"
 
-            # Add snooze button for Stages 0-3
-            if ($StageConfig.Stage -lt 4) {
+            # Add snooze button for Stages 0-2 only (Stage 3 is final warning with no snooze)
+            # Stage 3: User must decide - Reboot Now or Dismiss (transitions to Stage 4)
+            # Stage 4: No snooze, forced reboot decision
+            if ($StageConfig.Stage -lt 3 -and -not [string]::IsNullOrEmpty($StageConfig.SnoozeInterval)) {
                 $SnoozeInterval = $StageConfig.SnoozeInterval
                 $SnoozeLabel = ""
                 switch ($SnoozeInterval) {
@@ -1885,6 +1898,9 @@ If ($XMLValid -eq $True) {
                 $SnoozeProtocolUri = "toast-snooze://$ToastGUID/$SnoozeInterval"
                 Write-Output "Adding snooze button: $SnoozeLabel (Protocol: $SnoozeProtocolUri)"
                 $ActionsXML += "<action arguments=`"$SnoozeProtocolUri`" content=`"$SnoozeLabel`" activationType=`"protocol`" />"
+            }
+            elseif ($StageConfig.Stage -eq 3) {
+                Write-Output "Stage 3: Final warning - No snooze button (user must reboot or dismiss)"
             }
 
             # Stage 4: Add "Reboot Now" button instead of generic action button

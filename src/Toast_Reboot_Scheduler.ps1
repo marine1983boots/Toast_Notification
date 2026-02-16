@@ -5,6 +5,19 @@ Created by:   Ben Whitmore (with AI assistance)
 Filename:     Toast_Reboot_Scheduler.ps1
 ===========================================================================
 
+Version 1.3 - 16/02/2026
+-BLOCKER FIX: Unregister-ScheduledTask wrapped in try-catch (lines 144-156)
+-Prevents Access Denied on task deletion from terminating scheduler
+-Task deletion failure is non-fatal: Register-ScheduledTask -Force overwrites existing task
+-Improves reliability in environments with restricted Task Scheduler permissions
+-Production-critical stability fix
+
+Version 1.2 - 16/02/2026
+-CRITICAL FIX: Reset ErrorActionPreference before scheduled task registration
+-Ensures Register-ScheduledTask errors are caught by inner try-catch (lines 174-214)
+-Prevents Access Denied errors from bypassing specific error handling to outer catch
+-Fixes issue where $ErrorActionPreference='Stop' at line 76 caused terminating errors
+
 Version 1.1 - 16/02/2026
 -Added [CmdletBinding()] for proper cmdlet behavior
 -Added ValidatePattern to ToastGUID parameter for input validation
@@ -126,15 +139,28 @@ try {
         }
     }
 
+    # Reset ErrorActionPreference for scheduled task section
+    # This ensures the inner try-catch properly handles Register-ScheduledTask errors
+    # instead of bypassing to the outer catch block
+    $ErrorActionPreference = 'Continue'
+
     # Create scheduled task for reboot
     Write-Output "Creating scheduled task for system reboot..."
     $TaskName = "BIOS_Reboot_$ToastGUID"
 
     # Remove old task if it exists
+    # Note: Unregister-ScheduledTask may fail with Access Denied, but Register-ScheduledTask
+    # with -Force flag will overwrite the existing task, so deletion failure is non-fatal
     $ExistingTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
     if ($ExistingTask) {
-        Write-Output "Removing existing reboot task: $TaskName"
-        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+        try {
+            Write-Output "Removing existing reboot task: $TaskName"
+            Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop
+        }
+        catch {
+            Write-Warning "Could not delete existing task (will be overwritten): $($_.Exception.Message)"
+            # Continue - Register-ScheduledTask with -Force will overwrite the existing task
+        }
     }
 
     # Build shutdown command (5 minute warning)

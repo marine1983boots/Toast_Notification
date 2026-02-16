@@ -5,6 +5,19 @@ Created by:   Ben Whitmore (with AI assistance)
 Filename:     Toast_Snooze_Handler.ps1
 ===========================================================================
 
+Version 1.4 - 16/02/2026
+-BLOCKER FIX: Unregister-ScheduledTask wrapped in try-catch (lines 360-372)
+-Prevents Access Denied on task deletion from terminating handler
+-Task deletion failure is non-fatal: Register-ScheduledTask -Force overwrites existing task
+-Improves reliability in environments with restricted Task Scheduler permissions
+-Production-critical stability fix
+
+Version 1.3 - 16/02/2026
+-CRITICAL FIX: Reset ErrorActionPreference before scheduled task registration
+-Ensures Register-ScheduledTask errors are caught by inner try-catch (lines 389-429)
+-Prevents Access Denied errors from bypassing specific error handling to outer catch
+-Fixes issue where $ErrorActionPreference='Stop' at line 203 caused terminating errors
+
 Version 1.2 - 16/02/2026
 -Added configurable registry location: $RegistryHive and $RegistryPath parameters
 -Added $LogDirectory parameter for centralized logging
@@ -342,15 +355,28 @@ try {
 
     Write-Output "Toast script path: $ToastScriptPath"
 
+    # Reset ErrorActionPreference for scheduled task section
+    # This ensures the inner try-catch properly handles Register-ScheduledTask errors
+    # instead of bypassing to the outer catch block
+    $ErrorActionPreference = 'Continue'
+
     # Create scheduled task for next toast display
     Write-Output "Creating scheduled task..."
     $TaskName = "Toast_Notification_$($ToastGuid)_Snooze$NewSnoozeCount"
 
     # Remove old task if it exists
+    # Note: Unregister-ScheduledTask may fail with Access Denied, but Register-ScheduledTask
+    # with -Force flag will overwrite the existing task, so deletion failure is non-fatal
     $ExistingTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
     if ($ExistingTask) {
-        Write-Output "Removing existing task: $TaskName"
-        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+        try {
+            Write-Output "Removing existing task: $TaskName"
+            Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop
+        }
+        catch {
+            Write-Warning "Could not delete existing task (will be overwritten): $($_.Exception.Message)"
+            # Continue - Register-ScheduledTask with -Force will overwrite the existing task
+        }
     }
 
     # Build task action with updated SnoozeCount parameter
