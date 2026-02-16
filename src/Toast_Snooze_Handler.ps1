@@ -5,6 +5,13 @@ Created by:   Ben Whitmore (with AI assistance)
 Filename:     Toast_Snooze_Handler.ps1
 ===========================================================================
 
+Version 1.5.4 - 16/02/2026
+-DIAGNOSTIC: Enhanced logging for trigger activation troubleshooting
+-Added detailed diagnostics for Set-ScheduledTask and Enable-ScheduledTask operations
+-Logs show: task state before/after, trigger details, error details with codes
+-Added log file path, user context, and domain to startup output
+-Helps diagnose why triggers not being set on corporate machines
+
 Version 1.5.3 - 16/02/2026
 -CRITICAL FIX: Remove settings update from Set-ScheduledTask to avoid credentials error
 -Resolves "username or password is incorrect" error (0x8007052E) on corporate machines
@@ -232,11 +239,16 @@ if (!(Test-Path $LogDirectory)) {
 Start-Transcript -Path $LogPath -Append
 
 Write-Output "========================================="
-Write-Output "Toast Snooze Handler Started"
+Write-Output "Toast Snooze Handler Started (v1.5.4)"
+Write-Output "========================================="
 Write-Output "ProtocolUri: $ProtocolUri"
 Write-Output "ToastGUID: $ToastGUID"
 Write-Output "SnoozeInterval: $SnoozeInterval"
 Write-Output "Timestamp: $(Get-Date -Format 's')"
+Write-Output "Log File: $LogPath"
+Write-Output "Log Directory: $LogDirectory"
+Write-Output "Current User: $env:USERNAME"
+Write-Output "Current Domain: $env:USERDOMAIN"
 Write-Output "========================================="
 
 # Registry path for this toast instance (dynamic based on deployment)
@@ -432,28 +444,77 @@ try {
     try {
         # Get the pre-created task (should exist from SYSTEM deployment)
         $ExistingTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+        Write-Output "========================================="
+        Write-Output "TASK ACTIVATION - DETAILED DIAGNOSTICS"
+        Write-Output "========================================="
         Write-Output "Found pre-created task: $TaskName"
+        Write-Output "  Current State: $($ExistingTask.State)"
+        Write-Output "  Current Triggers: $($ExistingTask.Triggers.Count)"
+        if ($ExistingTask.Triggers.Count -gt 0) {
+            Write-Output "  Existing Trigger Time: $($ExistingTask.Triggers[0].StartBoundary)"
+        }
+        Write-Output ""
 
         # Create trigger for calculated time
+        Write-Output "Creating new trigger..."
         $Task_Trigger = New-ScheduledTaskTrigger -Once -At $NextTrigger
         $Task_Trigger.EndBoundary = $Task_Expiry
+        Write-Output "  Trigger Start: $($NextTrigger.ToString('s'))"
+        Write-Output "  Trigger End: $($Task_Expiry)"
+        Write-Output "  Trigger Type: $($Task_Trigger.GetType().Name)"
+        Write-Output ""
 
         # Update the task with new trigger (settings already correct from SYSTEM pre-creation)
-        Set-ScheduledTask -TaskName $TaskName -Trigger $Task_Trigger -ErrorAction Stop | Out-Null
-        Write-Output "Task trigger updated to: $($NextTrigger.ToString('s'))"
+        Write-Output "Updating task trigger via Set-ScheduledTask..."
+        try {
+            $UpdatedTask = Set-ScheduledTask -TaskName $TaskName -Trigger $Task_Trigger -ErrorAction Stop
+            Write-Output "[OK] Set-ScheduledTask completed"
+            Write-Output "  Triggers after update: $($UpdatedTask.Triggers.Count)"
+            if ($UpdatedTask.Triggers.Count -gt 0) {
+                Write-Output "  New Trigger Start: $($UpdatedTask.Triggers[0].StartBoundary)"
+                Write-Output "  New Trigger End: $($UpdatedTask.Triggers[0].EndBoundary)"
+            }
+        }
+        catch {
+            Write-Error "[FAIL] Set-ScheduledTask failed: $($_.Exception.Message)"
+            Write-Error "  Error Type: $($_.Exception.GetType().FullName)"
+            Write-Error "  Error Code: $($_.Exception.HResult)"
+            throw
+        }
+        Write-Output ""
 
         # Enable the task (standard users CAN do this)
-        Enable-ScheduledTask -TaskName $TaskName -ErrorAction Stop | Out-Null
-        Write-Output "Task enabled successfully"
+        Write-Output "Enabling task via Enable-ScheduledTask..."
+        try {
+            $EnabledTask = Enable-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+            Write-Output "[OK] Enable-ScheduledTask completed"
+            Write-Output "  State after enable: $($EnabledTask.State)"
+        }
+        catch {
+            Write-Error "[FAIL] Enable-ScheduledTask failed: $($_.Exception.Message)"
+            Write-Error "  Error Type: $($_.Exception.GetType().FullName)"
+            throw
+        }
+        Write-Output ""
 
         # Verify task was enabled and trigger set
+        Write-Output "Final verification..."
         $VerifyTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+        Write-Output "  Final State: $($VerifyTask.State)"
+        Write-Output "  Final Trigger Count: $($VerifyTask.Triggers.Count)"
+        if ($VerifyTask.Triggers.Count -gt 0) {
+            Write-Output "  Final Trigger Start: $($VerifyTask.Triggers[0].StartBoundary)"
+            Write-Output "  Final Trigger End: $($VerifyTask.Triggers[0].EndBoundary)"
+            Write-Output "  Final Trigger Enabled: $($VerifyTask.Triggers[0].Enabled)"
+        }
+
         if ($VerifyTask.State -eq 'Ready') {
             Write-Output "[OK] Task verification passed: State=Ready"
         }
         else {
-            Write-Warning "Task state is: $($VerifyTask.State) (expected: Ready)"
+            Write-Warning "[WARNING] Task state is: $($VerifyTask.State) (expected: Ready)"
         }
+        Write-Output "========================================="
     }
     catch [Microsoft.Management.Infrastructure.CimException] {
         # Task doesn't exist - means Toast_Notify.ps1 wasn't deployed with -EnableProgressive as SYSTEM
