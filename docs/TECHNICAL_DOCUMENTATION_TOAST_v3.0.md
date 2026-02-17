@@ -5,7 +5,7 @@
 | Field | Value |
 |-------|-------|
 | Document Title | Technical Documentation - Progressive Toast Notification System v3.0 |
-| Version | 3.2 |
+| Version | 3.3 |
 | Date | 2026-02-17 |
 | Author | CR |
 | Based On | Toast by Ben Whitmore (@byteben) |
@@ -29,6 +29,7 @@
 | 3.0.1 | 2026-02-13 | CR | Added corporate environment compatibility (v2.2 error handling) |
 | 3.1 | 2026-02-16 | CR | Added configurable registry/log locations (v2.3), permission management, HKCU mode |
 | 3.2 | 2026-02-17 | CR | Added Section 12: Scheduled Task DACL Permission Architecture covering v2.14 AU SDDL grant; updated security controls, definitions, and quality records for v2.14 |
+| 3.3 | 2026-02-17 | CR | Updated for v2.15: Win8 task schema, DeleteExpiredTaskAfter 30-day auto-cleanup; added Section 12.6 change log and code review record CR-TOAST-v2.15-001 |
 
 ## Table of Contents
 
@@ -2614,6 +2615,48 @@ if ($SecDescriptor -notmatch 'A;;GRGWGX;;;AU') {
 | Error isolation | Separate `try-catch-finally` wrapping only the COM/ACL section | ACL failure is non-fatal; task still functions as a base task even without the permission grant |
 | SYSTEM context guard | `$CurrentIdentity -ne "NT AUTHORITY\SYSTEM"` check at function entry | Function returns immediately if not running as SYSTEM, preventing permission errors during user-context replay |
 
+#### 12.2.4 Task Schema and Lifecycle Settings (v2.15)
+
+**Introduced In:** Toast_Notify.ps1 v2.15
+
+**Background**
+
+Windows Scheduled Task XML is versioned. The `-Compatibility` parameter passed to `New-ScheduledTaskSettingsSet` determines which schema version is embedded in the task definition XML:
+
+| Schema Value | Task XML `<Task version>` | Minimum OS | Supports `DeleteExpiredTaskAfter` |
+|---|---|---|---|
+| `V1` | 1.1 (Windows XP/2003) | Windows XP | No |
+| `Win8` | 1.3 (Windows 8/Server 2012) | Windows 8 | Yes |
+
+Prior to v2.15, both `Initialize-SnoozeTasks` and the main toast task used `-Compatibility V1`. This worked on standard workstations but raised XML error `0x8004131F` ("The task XML contains a value which is incorrectly formatted or out of range") on corporate endpoints enforcing strict Group Policy Object (GPO) task validation, because `DeleteExpiredTaskAfter` is not a valid element in schema version 1.1.
+
+**Change Applied in v2.15**
+
+Both task registration points were updated to use `-Compatibility Win8`:
+
+```
+src/Toast_Notify.ps1
+  Initialize-SnoozeTasks  (~line 493-499)  -Compatibility Win8
+                                            -DeleteExpiredTaskAfter (New-TimeSpan -Days 30)
+  Main toast task         (~line 1572-1576) -Compatibility Win8
+                                            -DeleteExpiredTaskAfter (New-TimeSpan -Days 30)
+```
+
+**Rationale**
+
+- Toast_Notify.ps1 already requires Windows 10 as a minimum OS (per Section 1.2). Win8 schema (Windows 8/2012+) is therefore always satisfied on any in-scope endpoint.
+- `DeleteExpiredTaskAfter` is incompatible with V1 schema and raises `0x8004131F` under strict GPO validation.
+- Win8 schema is the appropriate compatibility level for all Windows 10/11 targets.
+
+**Lifecycle Behaviour After v2.15**
+
+| Task Type | Has EndBoundary? | DeleteExpiredTaskAfter Effect |
+|-----------|-----------------|-------------------------------|
+| Main toast task | Yes - EndBoundary set 2 minutes after trigger fires | Task auto-deleted 30 days after EndBoundary passes |
+| Snooze tasks (Snooze1-4) | No - created disabled with no trigger | No EndBoundary to expire; tasks remain as harmless disabled entries. Removed by `Remove-StaleToastFolders` or GUID reuse |
+
+**Note on snooze task persistence:** Snooze tasks are pre-created in a disabled state with no trigger or EndBoundary. `DeleteExpiredTaskAfter` measures from the expiry of the last trigger EndBoundary. Because disabled tasks with no trigger have no such boundary, they are unaffected by this setting and persist until explicitly cleaned up. This is expected and harmless behaviour.
+
 ### 12.3 ISO 27001 A.9.4.1 Access Control Assessment
 
 **Control Reference:** ISO 27001:2015 Annex A, Control A.9.4.1 - Information Access Restriction
@@ -2655,7 +2698,8 @@ The permission grant is limited in scope to minimize attack surface:
 
 - Applied only to tasks matching the naming pattern `Toast_Notification_{GUID}_Snooze{1-4}`
 - Each GUID is unique per deployment instance
-- Tasks self-clean upon expiry or reboot completion
+- Main toast task auto-deletes 30 days after its EndBoundary expires (Win8 schema, `DeleteExpiredTaskAfter` - see Section 12.2.4)
+- Snooze tasks (disabled, no trigger) are not subject to `DeleteExpiredTaskAfter`; they are cleaned up by `Remove-StaleToastFolders` or upon GUID reuse
 - Permission is applied per-task, not as a folder-level inherited ACE
 
 ### 12.4 Operational Procedures
@@ -2777,6 +2821,21 @@ If `Toast_Snooze_Handler.ps1` logs `Access Denied` when calling `Set-ScheduledTa
 | Code Location | `src/Toast_Notify.ps1`, function `Initialize-SnoozeTasks`, lines 505-531 |
 | Code Review | docs/CODE_REVIEW_v2.14_SDDL_PERMISSIONS.md - Approved with minor changes |
 | ISO 27001 | A.9.4.1 risk assessment completed; residual risk classified LOW (see 12.3.2) |
+
+### 12.6 Change Log for v2.15
+
+| Item | Description |
+|------|-------------|
+| Change 1 | `Initialize-SnoozeTasks`: `-Compatibility V1` replaced with `-Compatibility Win8` |
+| Change 2 | `Initialize-SnoozeTasks`: Added `-DeleteExpiredTaskAfter (New-TimeSpan -Days 30)` to snooze task settings |
+| Change 3 | Main toast task registration: `-Compatibility V1` replaced with `-Compatibility Win8` |
+| Change 4 | Main toast task registration: Added `-DeleteExpiredTaskAfter (New-TimeSpan -Days 30)` to main task settings |
+| Reason | `-DeleteExpiredTaskAfter` is incompatible with V1 schema (raises XML error 0x8004131F on GPO-strict endpoints); Win8 schema supports this element and is always satisfied on Windows 10+ targets |
+| Effect on snooze tasks | None - snooze tasks have no EndBoundary; `DeleteExpiredTaskAfter` does not trigger for them |
+| Effect on main toast task | Main task auto-deletes 30 days after its EndBoundary expires (EndBoundary = 2 minutes after trigger fires) |
+| Code Locations | `src/Toast_Notify.ps1`, `Initialize-SnoozeTasks` (~lines 493-499); main task settings (~lines 1572-1576) |
+| Code Review | CR-TOAST-v2.15-001 - Approved (see Section 16.1) |
+| Schema Reference | Section 12.2.4 - Task Schema and Lifecycle Settings |
 
 ---
 
@@ -3123,6 +3182,8 @@ Get-ScheduledTask | Where-Object {$_.TaskName -like "Toast_Notification*"}
 
 **Caution:** Do not delete tasks with future NextRunTime (scheduled snoozes).
 
+**Note (v2.15 and later):** The main toast task (`Toast_Notification_{GUID}`) uses Win8 schema with `DeleteExpiredTaskAfter` set to 30 days. Windows Task Scheduler will auto-delete this task 30 days after its EndBoundary passes without manual intervention. Snooze tasks (`Toast_Notification_{GUID}_Snooze{1-4}`) are created disabled with no trigger and are not affected by `DeleteExpiredTaskAfter`; use the procedure above or `Remove-StaleToastFolders` to remove them.
+
 ### 15.3 Log File Rotation
 
 **Procedure ID:** TOAST-MAINT-003
@@ -3220,6 +3281,21 @@ $OldLogs | ForEach-Object {
 | 4 | LOW | Documentation | `GRGWGX` rights acronym not explained in code | Comment added listing Generic Read + Generic Write + Generic Execute |
 
 **Code Review Outcome:** All HIGH findings resolved. Code approved for production deployment. See Section 12 for full architectural documentation of the permission design.
+
+**Code Review ID:** CR-TOAST-v2.15-001
+**Date:** 2026-02-17
+**Reviewer:** PowerShell Code Reviewer Agent
+**Status:** APPROVED - NO CHANGES REQUIRED
+
+**Summary of Findings (v2.15):**
+
+| Finding # | Severity | Category | Description | Resolution |
+|-----------|----------|----------|-------------|------------|
+| 1 | INFO | Compatibility | `-Compatibility V1` raises XML error 0x8004131F with `DeleteExpiredTaskAfter` under strict GPO validation | Resolved by change: both task registrations updated to `-Compatibility Win8` |
+| 2 | INFO | Lifecycle | Main toast task EndBoundary confirmed present (2 min after trigger); `DeleteExpiredTaskAfter` 30 days will auto-delete task entry | Documented in Section 12.2.4 and Section 12.6 |
+| 3 | INFO | Lifecycle | Snooze tasks have no EndBoundary (created disabled, no trigger); `DeleteExpiredTaskAfter` does not apply to them | Documented; behaviour confirmed expected and harmless |
+
+**Code Review Outcome:** Change is a targeted schema and settings fix with no security implications. No new risks introduced. Approved for production deployment.
 
 ### 16.2 Security Testing Results
 
@@ -3530,6 +3606,7 @@ Action Snooze Dismiss
 |------|------|-----------|------|
 | Author | Ben Whitmore | _________________ | 2026-02-12 |
 | Author (v3.2 additions) | CR | _________________ | 2026-02-17 |
+| Author (v3.3 additions) | CR | _________________ | 2026-02-17 |
 | Technical Reviewer | Code Review Agent | APPROVED | 2026-02-17 |
 | Security Reviewer | Security Team | PENDING | 2026-02-17 |
 | Quality Assurance | QA Team | PENDING | 2026-02-17 |
@@ -3539,5 +3616,5 @@ Action Snooze Dismiss
 
 *End of Technical Documentation - Progressive Toast Notification System v3.0*
 
-*Version: 3.2 | Date: 2026-02-17*
+*Version: 3.3 | Date: 2026-02-17*
 *Licensed under GNU General Public License v3*
