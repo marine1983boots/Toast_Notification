@@ -1,5 +1,29 @@
 # Version History
 
+**Version 2.4 - 16/02/2026**
+
+- Added `-WorkingDirectory` parameter for organized folder structure per toast instance
+- Added `-Dismiss` switch to control dismiss (X) button visibility (default: hidden for forced engagement)
+- Added automatic folder structure: `WorkingDirectory\{GUID}\Logs\` and `Scripts\` subfolders
+- Added automatic cleanup function: Removes stale toast folders after configurable threshold
+- Added `-CleanupDaysThreshold` parameter to control automatic bloat prevention (default: 30 days)
+- Removed `-LogDirectory` parameter (simplified: logs always in WorkingDirectory\{GUID}\Logs\)
+- Centralized logging: All logs (Toast_Notify, handlers) in Logs\ subfolder
+- Isolated script staging: Handler working copies in Scripts\ subfolder
+- Changed default location: `C:\ProgramData\ToastNotification\{GUID}` (was: `C:\Windows\Temp\{GUID}`)
+- Full backwards compatibility maintained
+
+**Version 2.3 - 16/02/2026**
+
+- Added configurable registry location: `-RegistryHive` parameter (HKLM/HKCU/Custom)
+- Added custom registry path support: `-RegistryPath` parameter
+- Added centralized logging: `-LogDirectory` parameter
+- Automatic permission management for HKLM mode (Grant-RegistryPermissions function)
+- Fixes "Access Denied" errors in corporate environments when snooze button clicked
+- Enables per-user state mode (HKCU) for multi-user scenarios
+- Updated protocol handlers to pass registry and log parameters
+- Full backwards compatibility maintained (defaults to HKLM)
+
 **Version 2.1 - 11/02/2026**
 
 - Added -ToastScenario parameter to control toast notification priority and behavior
@@ -129,7 +153,91 @@ Toast_Notify.ps1 -XMLSource "Maintenance.xml" -ToastScenario "reminder" -Snooze
 **.EXAMPLE**
 
 Toast_Notify.ps1 -Snooze
-  
+
+### New Parameters (v2.4+)
+
+**Registry Configuration:**
+
+**.PARAMETER RegistryHive**
+
+Controls where toast state is stored. Valid values:
+- **HKLM** (default): Machine-wide state. All users share the same snooze count. Requires permission grant during SYSTEM deployment. Best for ensuring machine gets rebooted regardless of user.
+- **HKCU**: Per-user state. Each user has independent snooze count. No permission issues. Best for multi-user machines.
+- **Custom**: Advanced scenario for custom registry paths. Requires manual permission management.
+
+**.PARAMETER RegistryPath**
+
+Custom registry path under the hive (default: SOFTWARE\ToastNotification). Only used when RegistryHive is Custom.
+
+**.PARAMETER WorkingDirectory**
+
+Base directory for organized folder structure. Creates `WorkingDirectory\{GUID}\Logs\` and `Scripts\` subfolders.
+- Default: `C:\ProgramData\ToastNotification`
+- All logs centralized in Logs\ subfolder
+- Handler scripts staged in Scripts\ subfolder
+- Easy cleanup: Delete entire `{GUID}` folder
+
+**.PARAMETER CleanupDaysThreshold**
+
+Number of days before stale toast folders are automatically removed (default: 30 days).
+- Prevents bloat from accumulated old toast instances
+- Runs during SYSTEM context deployment
+- Based on most recent file modification time
+
+**.PARAMETER Dismiss**
+
+Enable dismiss (X) button in toast notification (default: hidden).
+- **Default (no -Dismiss)**: Dismiss button hidden - forces user to choose action (snooze/reboot)
+- **With -Dismiss**: Dismiss button visible - allows user to close without action
+- Use for informational toasts or testing
+
+**.EXAMPLE - Corporate Deployment with Organized Structure**
+
+```powershell
+# Deploy as SYSTEM with organized folder structure
+powershell.exe -ExecutionPolicy Bypass -File Toast_Notify.ps1 `
+    -EnableProgressive `
+    -RegistryHive HKLM `
+    -WorkingDirectory "C:\ProgramData\ITServices\Notifications"
+
+# Results in: C:\ProgramData\ITServices\Notifications\{GUID}\Logs\ and Scripts\
+```
+
+**.EXAMPLE - HKCU Mode (Multi-User)**
+
+```powershell
+# Each user has independent state, no permission issues
+powershell.exe -ExecutionPolicy Bypass -File Toast_Notify.ps1 `
+    -EnableProgressive `
+    -RegistryHive HKCU
+```
+
+**.EXAMPLE - Informational Toast with Dismiss Button**
+
+```powershell
+# Non-critical notification with dismiss button visible
+powershell.exe -ExecutionPolicy Bypass -File Toast_Notify.ps1 `
+    -Dismiss `
+    -XMLSource "InformationalMessage.xml"
+```
+
+**.EXAMPLE - Custom Cleanup Threshold**
+
+```powershell
+# Aggressive cleanup: Remove toast folders older than 7 days
+powershell.exe -ExecutionPolicy Bypass -File Toast_Notify.ps1 `
+    -EnableProgressive `
+    -WorkingDirectory "C:\ProgramData\Notifications" `
+    -CleanupDaysThreshold 7
+```
+
+**Troubleshooting:**
+
+If you encounter "Access Denied" errors when clicking snooze:
+1. Re-deploy as SYSTEM with `-RegistryHive HKLM` (automatic permission grant)
+2. Switch to HKCU mode: `-RegistryHive HKCU` (no permissions needed)
+3. See TECHNICAL_DOCUMENTATION_TOAST_v3.0.md Section 11 for detailed troubleshooting
+
 **Known Issues** 
   
 -Images in the XML can only be read from the local file system. This is not an issue if we are deploying the package from MEMCM  

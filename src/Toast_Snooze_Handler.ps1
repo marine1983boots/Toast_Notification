@@ -5,6 +5,92 @@ Created by:   Ben Whitmore (with AI assistance)
 Filename:     Toast_Snooze_Handler.ps1
 ===========================================================================
 
+Version 1.9 - 17/02/2026
+-ARCHITECTURE CHANGE: Replaced pre-created task activation with dynamic task creation in user context
+-ROOT CAUSE: All pre-created task principal types failed for standard user modification
+  (GroupId/SeBatchLogonRight, InteractiveToken/UserId schema, InteractiveToken without UserId/service error)
+-FIX: Standard users register tasks that run as themselves (-UserId $env:USERNAME -LogonType Interactive)
+-FIX: XMLSource and ToastScenario read from registry (stored by Toast_Notify.ps1 v2.23 SYSTEM deployment)
+-FIX: Secondary bug - previous task action args were missing -XMLSource and -ToastScenario parameters
+-Task naming changed: Toast_Notification_{GUID}_Snooze{N} (unique per snooze count, auto-expires)
+-Previous snooze task cleaned up via Unregister-ScheduledTask (non-fatal if already expired)
+
+Version 1.8 - 17/02/2026
+-FIX: Restructured task activation block - separate Get-ScheduledTask catch (task not found) from Set-ScheduledTask/Enable-ScheduledTask catch (activation failure)
+-Resolves misleading 'PRE-CREATED TASK NOT FOUND' message when actual error was Set-ScheduledTask access denied
+-CimException catch now ONLY fires when Get-ScheduledTask returns task-not-found, not when Set-ScheduledTask fails
+
+Version 1.7 - 17/02/2026
+-FIX: Added $ErrorActionPreference='Continue' at start of all catch blocks
+-Prevents Write-Error in catch blocks from becoming terminating errors under $EAP='Stop'
+-Root cause of "614 char 5" error: $EAP='Stop' set in outer try (line 264) cascaded through
+ Write-Error calls inside inner catch blocks, causing them to throw and escape to outer catch
+-Set-ScheduledTask error messages now properly logged instead of being swallowed by the cascade
+-$ErrorActionPreference='Continue' resets error preference locally inside each catch block only
+
+Version 1.6 - 17/02/2026
+-Updated error messages: -EnableProgressive parameter renamed to -Snooze
+-Removed -SnoozeCount 0 from deployment command examples
+-No logic changes (snooze handler behavior unchanged)
+
+Version 1.5.4 - 16/02/2026
+-DIAGNOSTIC: Enhanced logging for trigger activation troubleshooting
+-Added detailed diagnostics for Set-ScheduledTask and Enable-ScheduledTask operations
+-Logs show: task state before/after, trigger details, error details with codes
+-Added log file path, user context, and domain to startup output
+-Helps diagnose why triggers not being set on corporate machines
+
+Version 1.5.3 - 16/02/2026
+-CRITICAL FIX: Remove settings update from Set-ScheduledTask to avoid credentials error
+-Resolves "username or password is incorrect" error (0x8007052E) on corporate machines
+-Only update trigger, not settings (settings already correct from SYSTEM pre-creation)
+-Corporate GPO requires password validation when modifying group-based principal tasks
+-Pre-created tasks from Toast_Notify.ps1 already have correct settings, no update needed
+
+Version 1.5.2 - 16/02/2026
+-COMPATIBILITY FIX: Removed DeleteExpiredTaskAfter parameter from task settings
+-Resolves "task XML incorrectly formatted" error (0x8004131F) on corporate machines
+-EndBoundary on trigger already prevents execution after expiry (no deletion needed)
+-Pre-created tasks now persist (disabled after use) instead of auto-deleting
+-Improves compatibility across Windows versions and GPO configurations
+
+Version 1.5.1 - 16/02/2026
+-ENHANCEMENT: Added task cleanup to prevent snooze task accumulation
+-Disables previous snooze task before enabling next task
+-Ensures only ONE snooze task is active at any time (prevents task swamping)
+-Non-fatal error handling: cleanup failure doesn't block current snooze
+-Tasks expire automatically per EndBoundary if disable fails (2-level protection)
+-Maintains system-wide snooze counting via HKLM registry
+
+Version 1.5 - 16/02/2026
+-CRITICAL FIX: Replace Register-ScheduledTask with Set-ScheduledTask/Enable-ScheduledTask
+-Uses pre-created disabled tasks from Toast_Notify.ps1 SYSTEM deployment (enterprise solution)
+-Standard users modify existing tasks (Set/Enable) instead of creating new ones (Register)
+-Eliminates Access Denied errors in standard user context (USER can modify, cannot create)
+-Added comprehensive error handling for missing pre-created tasks
+-Added deployment verification and helpful error messages
+-Follows PSADT enterprise pattern: SYSTEM pre-creates, USER modifies
+
+Version 1.4 - 16/02/2026
+-BLOCKER FIX: Unregister-ScheduledTask wrapped in try-catch (lines 360-372)
+-Prevents Access Denied on task deletion from terminating handler
+-Task deletion failure is non-fatal: Register-ScheduledTask -Force overwrites existing task
+-Improves reliability in environments with restricted Task Scheduler permissions
+-Production-critical stability fix
+
+Version 1.3 - 16/02/2026
+-CRITICAL FIX: Reset ErrorActionPreference before scheduled task registration
+-Ensures Register-ScheduledTask errors are caught by inner try-catch (lines 389-429)
+-Prevents Access Denied errors from bypassing specific error handling to outer catch
+-Fixes issue where $ErrorActionPreference='Stop' at line 203 caused terminating errors
+
+Version 1.2 - 16/02/2026
+-Added configurable registry location: $RegistryHive and $RegistryPath parameters
+-Added $LogDirectory parameter for centralized logging
+-Added comprehensive UnauthorizedAccessException error handling with solution guidance
+-Dynamic registry path construction based on deployment configuration
+-Fixes Access Denied errors in corporate environments
+
 Version 1.1 - 12/02/2026
 -Applied [System.Uri] class for proper protocol URI parsing
 -Added post-decode validation to prevent bypass attacks
@@ -57,7 +143,14 @@ Toast_Notify.ps1 deployment but executes in USER context when invoked.
 Param(
     [Parameter(Mandatory = $true)]
     [ValidatePattern('^toast-snooze://[A-F0-9\-]{1,36}/(15m|30m|1h|2h|4h|eod)$')]
-    [String]$ProtocolUri
+    [String]$ProtocolUri,
+    [Parameter(Mandatory = $false)]
+    [ValidateSet('HKLM', 'HKCU')]
+    [String]$RegistryHive = 'HKLM',
+    [Parameter(Mandatory = $false)]
+    [String]$RegistryPath = 'SOFTWARE\ToastNotification',
+    [Parameter(Mandatory = $false)]
+    [String]$LogDirectory = $ENV:Windir + "\Temp"
 )
 
 #region Helper Functions
@@ -145,6 +238,7 @@ function Parse-SnoozeUri {
         }
     }
     catch {
+        $ErrorActionPreference = 'Continue'
         Write-Error "Failed to parse snooze URI: $($_.Exception.Message)"
         Write-Error "Provided URI: $Uri"
         throw
@@ -160,27 +254,40 @@ try {
     $SnoozeInterval = $ParsedUri.Interval
 }
 catch {
+    $ErrorActionPreference = 'Continue'
     Write-Error "FATAL: Failed to parse protocol URI: $ProtocolUri"
     Write-Error $_.Exception.Message
     exit 1
 }
 
 # Start logging
-$LogPath = (Join-Path $ENV:Windir "Temp\$($ToastGuid)_Snooze.log")
+$LogPath = Join-Path $LogDirectory "$($ToastGuid)_Snooze.log"
+# Ensure log directory exists
+if (!(Test-Path $LogDirectory)) {
+    New-Item -Path $LogDirectory -ItemType Directory -Force | Out-Null
+}
 Start-Transcript -Path $LogPath -Append
 
 Write-Output "========================================="
-Write-Output "Toast Snooze Handler Started"
+Write-Output "Toast Snooze Handler Started (v1.9)"
+Write-Output "========================================="
 Write-Output "ProtocolUri: $ProtocolUri"
 Write-Output "ToastGUID: $ToastGUID"
 Write-Output "SnoozeInterval: $SnoozeInterval"
 Write-Output "Timestamp: $(Get-Date -Format 's')"
+Write-Output "Log File: $LogPath"
+Write-Output "Log Directory: $LogDirectory"
+Write-Output "Current User: $env:USERNAME"
+Write-Output "Current Domain: $env:USERDOMAIN"
 Write-Output "========================================="
 
-# Registry path for this toast instance
-$RegPath = "HKLM:\SOFTWARE\ToastNotification\$ToastGUID"
+# Registry path for this toast instance (dynamic based on deployment)
+$RegPath = "${RegistryHive}:\${RegistryPath}\$ToastGUID"
+Write-Output "Using registry path: $RegPath"
 
 try {
+    $ErrorActionPreference = 'Stop'
+
     # Read current state from registry
     Write-Output "Reading current state from registry..."
     if (!(Test-Path $RegPath)) {
@@ -194,6 +301,22 @@ try {
     $CurrentSnoozeCount = $CurrentState.SnoozeCount
 
     Write-Output "Current SnoozeCount: $CurrentSnoozeCount"
+
+    # Read XMLSource and ToastScenario from registry (stored by SYSTEM deployment v2.23+).
+    # These values are required to build correct task action arguments for the snooze task.
+    # Without them the re-displayed toast would use the default CustomMessage.xml which may
+    # not exist in the staged directory, causing the scheduled toast to fail silently.
+    $StoredXMLSource = $CurrentState.XMLSource
+    $StoredToastScenario = $CurrentState.ToastScenario
+    if ([string]::IsNullOrEmpty($StoredXMLSource)) {
+        Write-Warning "XMLSource not found in registry - using default CustomMessage.xml"
+        $StoredXMLSource = "CustomMessage.xml"
+    }
+    if ([string]::IsNullOrEmpty($StoredToastScenario)) {
+        $StoredToastScenario = "alarm"
+    }
+    Write-Output "Toast XMLSource: $StoredXMLSource"
+    Write-Output "Toast Scenario: $StoredToastScenario"
 
     # Validate snooze count (max 4)
     if ($CurrentSnoozeCount -ge 4) {
@@ -252,9 +375,46 @@ try {
 
     # Update registry with new state
     Write-Output "Updating registry..."
-    Set-ItemProperty -Path $RegPath -Name "SnoozeCount" -Value $NewSnoozeCount
-    Set-ItemProperty -Path $RegPath -Name "LastShown" -Value (Get-Date).ToString('s')
-    Set-ItemProperty -Path $RegPath -Name "LastSnoozeInterval" -Value $SnoozeInterval
+    try {
+        Set-ItemProperty -Path $RegPath -Name "SnoozeCount" -Value $NewSnoozeCount -ErrorAction Stop
+        Set-ItemProperty -Path $RegPath -Name "LastShown" -Value (Get-Date).ToString('s') -ErrorAction Stop
+        Set-ItemProperty -Path $RegPath -Name "LastSnoozeInterval" -Value $SnoozeInterval -ErrorAction Stop
+    }
+    catch [System.UnauthorizedAccessException] {
+        $ErrorActionPreference = 'Continue'
+        Write-Error "========================================"
+        Write-Error "ACCESS DENIED - Registry Write Failed"
+        Write-Error "========================================"
+        Write-Error ""
+        Write-Error "This error indicates incorrect deployment or GPO restrictions."
+        Write-Error ""
+        Write-Error "SOLUTIONS:"
+        Write-Error "1. Re-deploy Toast_Notify.ps1 as SYSTEM with -Snooze"
+        Write-Error "   This will automatically grant necessary permissions to BUILTIN\Users"
+        Write-Error ""
+        Write-Error "2. Deploy with -RegistryHive HKCU for per-user state (no permissions needed)"
+        Write-Error "   Example: Toast_Notify.ps1 -Snooze -RegistryHive HKCU"
+        Write-Error ""
+        Write-Error "3. Manually grant permissions (PowerShell as Admin):"
+        Write-Error "   `$Path = '$RegPath'"
+        Write-Error "   `$Acl = Get-Acl -Path `$Path"
+        Write-Error "   `$Rule = New-Object System.Security.AccessControl.RegistryAccessRule('BUILTIN\Users', 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')"
+        Write-Error "   `$Acl.AddAccessRule(`$Rule)"
+        Write-Error "   Set-Acl -Path `$Path -AclObject `$Acl"
+        Write-Error ""
+        Write-Error "Registry Path: $RegPath"
+        Write-Error "Current User: $env:USERNAME"
+        Write-Error "Current Context: USER (not SYSTEM)"
+        Write-Error "========================================"
+        Stop-Transcript
+        exit 1
+    }
+    catch {
+        $ErrorActionPreference = 'Continue'
+        Write-Error "Failed to update registry: $($_.Exception.Message)"
+        Stop-Transcript
+        exit 1
+    }
 
     # Verify registry write succeeded
     $Verify = Get-ItemProperty -Path $RegPath -ErrorAction Stop
@@ -264,8 +424,10 @@ try {
 
     Write-Output "Registry updated and verified successfully"
 
-    # Calculate task expiry (2 minutes after trigger)
-    $Task_Expiry = $NextTrigger.AddMinutes(2).ToString('s')
+    # Task expiry window: 3 days after trigger.
+    # Allows the task to fire at the next login if the user was offline (e.g. midnight snooze,
+    # user returns next morning). StartWhenAvailable picks it up on login within this window.
+    $Task_Expiry = $NextTrigger.AddDays(3).ToString('s')
 
     # Get the toast script path (should be in same directory as this handler)
     $CurrentDir = Split-Path $MyInvocation.MyCommand.Path
@@ -286,65 +448,105 @@ try {
 
     Write-Output "Toast script path: $ToastScriptPath"
 
-    # Create scheduled task for next toast display
-    Write-Output "Creating scheduled task..."
-    $TaskName = "Toast_Notification_$($ToastGuid)_Snooze$NewSnoozeCount"
+    # Create snooze scheduled task dynamically in user context (v1.9)
+    # Architecture change: tasks are created by the USER at snooze time rather than pre-created by SYSTEM.
+    # Standard users can register tasks that run as themselves (-UserId $env:USERNAME).
+    # This eliminates all GroupId/SeBatchLogonRight and InteractiveToken/UserId schema failures.
+    Write-Output "Creating snooze scheduled task..."
+    $TaskName = "Toast_Notification_${ToastGUID}_$($env:USERNAME)_Snooze${NewSnoozeCount}"
 
-    # Remove old task if it exists
-    $ExistingTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-    if ($ExistingTask) {
-        Write-Output "Removing existing task: $TaskName"
-        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+    try {
+        $ErrorActionPreference = 'Stop'
+
+        # Build task components
+        $TaskArguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass" +
+            " -File `"$ToastScriptPath`"" +
+            " -ToastGUID `"$ToastGUID`"" +
+            " -XMLSource `"$StoredXMLSource`"" +
+            " -ToastScenario `"$StoredToastScenario`"" +
+            " -Snooze"
+        $TaskAction = New-ScheduledTaskAction `
+            -Execute "C:\WINDOWS\system32\WindowsPowerShell\v1.0\PowerShell.exe" `
+            -Argument $TaskArguments
+
+        $TaskTrigger = New-ScheduledTaskTrigger -Once -At $NextTrigger
+        $TaskTrigger.EndBoundary = $Task_Expiry
+
+        $TaskPrincipal = New-ScheduledTaskPrincipal `
+            -UserId $env:USERNAME `
+            -LogonType Interactive `
+            -RunLevel Limited
+
+        $TaskSettings = New-ScheduledTaskSettingsSet `
+            -MultipleInstances IgnoreNew `
+            -ExecutionTimeLimit (New-TimeSpan -Hours 1) `
+            -StartWhenAvailable `
+            -DeleteExpiredTaskAfter (New-TimeSpan -Hours 4)
+
+        # Register the task - standard users can register tasks that run as themselves
+        Register-ScheduledTask `
+            -TaskName $TaskName `
+            -Action $TaskAction `
+            -Trigger $TaskTrigger `
+            -Principal $TaskPrincipal `
+            -Settings $TaskSettings `
+            -Force `
+            -ErrorAction Stop | Out-Null
+
+        Write-Output "[OK] Snooze task registered: $TaskName"
+        Write-Output "     Fires at: $($NextTrigger.ToString('s'))"
+        Write-Output "     Expires at: $Task_Expiry (3 days - StartWhenAvailable enabled)"
+        Write-Output "     Runs as: $env:USERNAME (Interactive, Limited)"
+        Write-Output "     XMLSource: $StoredXMLSource"
+        Write-Output "     ToastScenario: $StoredToastScenario"
+    }
+    catch {
+        $ErrorActionPreference = 'Continue'
+        Write-Error "========================================"
+        Write-Error "FAILED TO CREATE SNOOZE TASK"
+        Write-Error "========================================"
+        Write-Error "Task: $TaskName"
+        Write-Error "Error: $($_.Exception.Message)"
+        Write-Error "Error Type: $($_.Exception.GetType().FullName)"
+        Write-Error ""
+        Write-Error "This should not occur - standard users can register tasks as themselves."
+        Write-Error "Check if Task Scheduler service is running and user account is not restricted."
+        Write-Error "========================================"
+        Stop-Transcript
+        exit 1
     }
 
-    # Build task action with updated SnoozeCount parameter
-    $Task_Action = New-ScheduledTaskAction `
-        -Execute "C:\WINDOWS\system32\WindowsPowerShell\v1.0\PowerShell.exe" `
-        -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""$ToastScriptPath"" -ToastGUID ""$ToastGUID"" -EnableProgressive -SnoozeCount $NewSnoozeCount"
-
-    # Create trigger for calculated time
-    $Task_Trigger = New-ScheduledTaskTrigger -Once -At $NextTrigger
-    $Task_Trigger.EndBoundary = $Task_Expiry
-
-    # Create principal (USERS group)
-    $Task_Principal = New-ScheduledTaskPrincipal -GroupId "S-1-5-32-545" -RunLevel Limited
-
-    # Create settings
-    $Task_Settings = New-ScheduledTaskSettingsSet `
-        -Compatibility V1 `
-        -DeleteExpiredTaskAfter (New-TimeSpan -Seconds 600) `
-        -AllowStartIfOnBatteries `
-        -DontStopIfGoingOnBatteries
-
-    # Build task
-    $New_Task = New-ScheduledTask `
-        -Description "Progressive Toast Notification - Snooze $NewSnoozeCount of 4. Next display at $($NextTrigger.ToString('g'))" `
-        -Action $Task_Action `
-        -Principal $Task_Principal `
-        -Trigger $Task_Trigger `
-        -Settings $Task_Settings
-
-    # Register task
-    Register-ScheduledTask -TaskName $TaskName -InputObject $New_Task -Force | Out-Null
-
-    Write-Output "Scheduled task created successfully: $TaskName"
-    Write-Output "Task will trigger at: $($NextTrigger.ToString('s'))"
-    Write-Output "User snoozed to $($NextTrigger.ToString('g')), count now $NewSnoozeCount/4"
-
-    # Verify task was created
-    $VerifyTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-    if ($VerifyTask) {
-        Write-Output "Task verification: [OK]"
+    # Clean up previous snooze task (non-fatal - task may have already expired/auto-deleted)
+    if ($NewSnoozeCount -gt 1) {
+        $PreviousTaskName = "Toast_Notification_${ToastGUID}_$($env:USERNAME)_Snooze$($NewSnoozeCount - 1)"
+        try {
+            $PreviousTask = Get-ScheduledTask -TaskName $PreviousTaskName -ErrorAction SilentlyContinue
+            if ($PreviousTask) {
+                Unregister-ScheduledTask -TaskName $PreviousTaskName -Confirm:$false -ErrorAction Stop
+                Write-Output "[OK] Cleaned up previous snooze task: $PreviousTaskName"
+            }
+            else {
+                Write-Output "[INFO] Previous task already removed (auto-expired): $PreviousTaskName"
+            }
+        }
+        catch {
+            Write-Warning "Could not clean up previous task ${PreviousTaskName}: $($_.Exception.Message)"
+            Write-Warning "Task will auto-delete per DeleteExpiredTaskAfter setting"
+        }
     }
     else {
-        Write-Error "Task verification: [FAIL] - Task not found after registration"
+        Write-Output "[INFO] First snooze (count=1) - no previous task to clean up"
     }
 
+    Write-Output ""
+    Write-Output "[OK] Snooze activated successfully"
+    Write-Output "     Next toast will appear at: $($NextTrigger.ToString('s'))"
     Write-Output "========================================="
     Write-Output "Toast Snooze Handler Completed Successfully"
     Write-Output "========================================="
 }
 catch {
+    $ErrorActionPreference = 'Continue'
     Write-Error "An error occurred in Toast_Snooze_Handler:"
     Write-Error $_.Exception.Message
     Write-Error $_.ScriptStackTrace

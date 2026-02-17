@@ -5,6 +5,163 @@ Created by:   Ben Whitmore
 Filename:     Toast_Notify.ps1
 ===========================================================================
 
+Version 2.24 - 17/02/2026
+-FIX: Added toast-dismiss:// protocol handler for proper dismiss cleanup
+-Dismiss button now unregisters pending snooze tasks and removes registry state
+-Stages 0-3: Shows Dismiss button (protocol-backed cleanup) alongside Reboot Now
+-Stage 4: No Dismiss button (user must make reboot decision)
+
+Version 2.23 - 17/02/2026
+-ARCHITECTURE CHANGE: Removed task pre-creation from SYSTEM deployment (Initialize-SnoozeTasks now a no-op)
+-ROOT CAUSE: All principal types for pre-created tasks fail for standard user modification (GroupId/SeBatchLogonRight, InteractiveToken/UserId schema)
+-FIX: Tasks now created dynamically by user context (Toast_Snooze_Handler.ps1 v1.9) using user's own credentials
+-FIX: XMLSource and ToastScenario now stored in HKLM registry during SYSTEM deployment for snooze handler to use
+-SECONDARY BUG: Pre-created task args were missing -XMLSource and -ToastScenario, toast would have failed to display
+
+Version 2.22 - 17/02/2026
+-FIX: Replaced New-ScheduledTaskPrincipal + Register-ScheduledTask with Register-ScheduledTask -Xml in Initialize-SnoozeTasks
+-ROOT CAUSE: NT AUTHORITY\INTERACTIVE is a virtual SID rejected by Task Scheduler XML schema as <UserId> element
+-SOLUTION: Manually constructed XML with <LogonType>InteractiveToken</LogonType> and NO <UserId> element is valid
+-FIX: Corrected false [OK] message when Initialize-SnoozeTasks fails - now checks last element of result array for boolean
+
+Version 2.21 - 17/02/2026
+-FIX: Changed pre-created snooze task principal from GroupId S-1-5-32-545 to NT AUTHORITY\INTERACTIVE (TASK_LOGON_INTERACTIVE_TOKEN)
+-ROOT CAUSE: GroupId principal requires SeBatchLogonRight per MSDN ITaskFolder::RegisterTaskDefinition. Standard users do not have this right by default.
+-INTERACTIVE principal allows standard users to call Set-ScheduledTask/Enable-ScheduledTask without SeBatchLogonRight
+-Task still runs in user session (interactive token preserved), toast displays correctly
+-DACL grant via SetSecurityDescriptor remains as belt-and-suspenders for explicit modify rights
+-DACL changed from D:(A;;GA;;;AU) to D:(A;;GRGWGX;;;SY)(A;;GRGWGX;;;BA)(A;;GRGWGX;;;IU)
+-ISO 27001 A.9.4.1: IU (INTERACTIVE) instead of AU (Authenticated Users) for least privilege
+-ISO 27001 A.9.4.1: GRGWGX instead of GA removes DELETE/WRITE_DAC/WRITE_OWNER (not needed for snooze)
+
+Version 2.20 - 17/02/2026
+-FIX: Initialize-SnoozeTasks now updates DACL on existing tasks (was skipping via continue)
+-FIX: Changed SDDL from FA (FILE_ALL_ACCESS) to GA (Generic All) for correct task object rights
+-DACL now applied regardless of whether task is new or pre-existing from previous deployment
+-Root cause: re-deploy found tasks already existing and did SuccessCount++; continue, skipping DACL grant
+-Tasks on test machine had DEFAULT DACL (SYSTEM+Admins only) because DACL block was never reached
+-Restructured for loop: create task if missing, then ALWAYS apply/verify DACL regardless
+
+Version 2.19 - 17/02/2026
+-FIX: Logging now works for both SYSTEM deployment and USER context execution
+-Start-Transcript called immediately after $LogPath is set (organized Logs\ folder)
+-SYSTEM context: deployment output now captured (Initialize-SnoozeTasks, DACL grant, task registration)
+-USER context: transcript now uses organized Logs\ path instead of %WINDIR%\Temp\{GUID}.log
+-Both contexts produce timestamped log files in {WorkingDirectory}\{GUID}\Logs\
+
+Version 2.18 - 17/02/2026
+-FIX: SetSecurityDescriptor flags corrected from 4 to 0 in Initialize-SnoozeTasks
+-Per MSDN IRegisteredTask::SetSecurityDescriptor only accepts flags=0 or flags=0x10 (TASK_DONT_ADD_PRINCIPAL_ACE)
+-flags=4 caused E_INVALIDARG (value does not fall within the expected range) at runtime
+-Replaced GetSecurityDescriptor + SDDL append with direct DACL set: D:(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;AU)
+-Direct DACL avoids SDDL parsing bugs (GetSecurityDescriptor(4) may return string without D: prefix)
+
+Version 2.17 - 17/02/2026
+-FIX: Correct SetSecurityDescriptor DACL grant in Initialize-SnoozeTasks (three bugs fixed):
+  1. GetSecurityDescriptor(4) instead of (0xF) - DACL_SECURITY_INFORMATION only; avoids SACL section
+     that caused appended ACE to land in SACL instead of DACL
+  2. SetSecurityDescriptor($sddl, 4) instead of ($sddl, 0) - passing 0 is a no-op; DACL not written
+  3. (A;;GA;;;AU) instead of (A;;GRGWGX;;;AU) - GA (Generic All) maps to TASK_ALL_ACCESS; generic
+     rights GRGWGX did not correctly map to Task Scheduler modify rights
+-Changed catch block from Write-Warning to Write-Error + throw so ACL failures are visible
+-Changed regex check to (?i)A;;(?:FA|GA|GRGWGX);;;AU to match any equivalent full-access ACE
+
+Version 2.16 - 17/02/2026
+-FIX: Removed -DeleteExpiredTaskAfter from pre-created snooze tasks only (Initialize-SnoozeTasks)
+-Root cause: DeleteExpiredTaskAfter requires a trigger with EndBoundary - tasks with no trigger fail XML validation
+-Pre-created snooze tasks have no trigger at creation (added later by snooze handler) - cannot use DeleteExpiredTaskAfter
+-Main notification task retains -DeleteExpiredTaskAfter (30 days) - it has trigger with EndBoundary set at creation
+-Pre-created snooze tasks are reused infrastructure (disabled/re-enabled), not candidates for auto-delete anyway
+
+Version 2.15 - 17/02/2026
+-Auto-delete expired tasks: Changed -Compatibility V1 to Win8 (snooze + main task)
+-Added -DeleteExpiredTaskAfter (30 days) to both task settings
+-OS self-cleans task entries 30 days after all triggers expire
+-V1 was incompatible with DeleteExpiredTaskAfter (XML error 0x8004131F on corporate machines)
+-Toast notifications require Windows 10 minimum; Win8 schema compatibility is correct for all targets
+
+Version 2.14 - 17/02/2026
+-FIX: Grant Authenticated Users (AU) read/write/execute on each pre-created snooze task
+-Uses Schedule.Service COM object to append (A;;GRGWGX;;;AU) to task security descriptor
+-Resolves Set-ScheduledTask / Enable-ScheduledTask Access Denied for standard users
+-Principal GroupId S-1-5-32-545 controls what account runs the task, NOT who can modify it
+-Task DACL defaults to Administrators+SYSTEM only; this adds explicit AU modify rights
+
+Version 2.13 - 17/02/2026
+-Pass -RegistryHive and -RegistryPath to Toast_Reboot_Handler.ps1 command registration
+-Enables reboot handler to clean up registry and tasks using correct registry location
+
+Version 2.12 - 17/02/2026
+-FIX: Replaced Dismiss button with Reboot Now button for Stages 0-3 in -Snooze mode
+-Snooze mode now shows: Snooze (0-2) + Learn More + Reboot Now (all stages)
+-Stage 4: Reboot Now only (unchanged)
+
+Version 2.11 - 17/02/2026
+-SIMPLIFICATION: Merged -EnableProgressive into -Snooze (single activation switch)
+-Removed -EnableProgressive parameter (breaking change - use -Snooze instead)
+-Removed -SnoozeCount parameter (stage read exclusively from registry)
+-ActionTemplateSnooze (system snooze dropdown) removed - -Snooze now activates stage system only
+-Unified button-building: -Snooze = stage-aware buttons, no -Snooze = Learn More + Dismiss only
+-Registry is authoritative for stage state (SnoozeCount always read from registry when -Snooze set)
+-Pre-created task arguments now use -Snooze only (not -EnableProgressive -SnoozeCount N)
+
+Version 2.10 - 16/02/2026
+-CLEANUP: Removed all remaining fallback-related comments and messages
+-Simplified error handling messages for clearer debugging
+-Cleaned up change log entries
+
+Version 2.7 - 16/02/2026
+-COMPATIBILITY FIX: Removed DeleteExpiredTaskAfter parameter from main toast task settings (line 1679)
+-Resolves "task XML incorrectly formatted" error (0x8004131F) on corporate machines
+-EndBoundary on trigger already prevents execution after expiry (no deletion needed)
+-Added DontStopIfGoingOnBatteries for consistency with other task configurations
+-Improves compatibility across Windows versions and GPO configurations
+
+Version 2.6 - 16/02/2026
+-CRITICAL FIX: Pre-create scheduled tasks during SYSTEM deployment (enterprise solution)
+-Added Initialize-SnoozeTasks function to create 4 disabled snooze tasks during initial deployment
+-Eliminates Access Denied errors when standard users click snooze (USER context can now modify pre-created tasks)
+-Tasks created with USERS group principal and disabled state (activated by snooze handler)
+-Follows PSADT enterprise pattern: SYSTEM pre-creates, USER modifies (cannot create)
+-Function called after Initialize-ToastRegistry in SYSTEM context only
+-Improved permissions model: Standard users modify existing tasks vs. creating new ones
+
+Version 2.5 - 16/02/2026
+-BLOCKER FIX: Stage 3 (final warning) no longer shows snooze button - forces reboot decision
+-BLOCKER FIX: Unregister-ScheduledTask errors no longer fatal (Register with -Force overwrites anyway)
+-Fixed progressive enforcement logic: Stage 3 is now true final warning (no snooze escape)
+-Snooze button visibility: Stages 0-2 (snooze allowed), Stage 3 (no snooze), Stage 4 (forced reboot)
+-Clarified Stage 3 behavior: User must reboot or dismiss (dismiss advances to Stage 4 on next run)
+-Improved Stage 3 configuration: SnoozeInterval set to empty string, comment explains no-snooze policy
+-Production-critical stability improvements
+
+Version 2.4 - 16/02/2026
+-Added $WorkingDirectory parameter for customizable base directory location (default: C:\ProgramData\ToastNotification)
+-Added $Dismiss switch parameter to control dismiss (X) button visibility (default: hidden, forces user engagement)
+-Added Initialize-ToastFolderStructure function to create organized folder layout per toast instance
+-Added Remove-StaleToastFolders function with automatic cleanup to prevent bloat
+-Added $CleanupDaysThreshold parameter to control automatic folder cleanup (default: 30 days)
+-Removed $LogDirectory parameter (simplified: logs always go to WorkingDirectory\{GUID}\Logs\)
+-Standardized folder structure: WorkingDirectory\{ToastGUID}\Logs\ and Scripts\ subfolders
+-Handler scripts staged to Scripts\ subfolder (working copies isolated per toast instance)
+-All logs (Toast_Notify, handlers) collated in Logs\ subfolder for centralized IT monitoring
+-Protocol handlers automatically receive correct Logs\ path
+-Dismiss button control: Default hides dismiss (X) button to enforce action selection, -Dismiss switch shows it
+-Automatic cleanup: Stale toast folders removed after threshold days (prevents accumulation)
+-Easy manual cleanup: Delete entire ToastGUID folder to remove all toast files
+-Changed default location: C:\ProgramData\ToastNotification\{GUID} (was: C:\Windows\Temp\{GUID})
+-Maintained full backwards compatibility
+
+Version 2.3 - 16/02/2026
+-Added configurable registry location: $RegistryHive (HKLM/HKCU/Custom) and $RegistryPath parameters
+-Added automatic permission granting via Grant-RegistryPermissions function for HKLM mode
+-Added $LogDirectory parameter for centralized logging
+-Updated Initialize-ToastRegistry, Get-ToastState, Set-ToastState to support dynamic registry paths
+-Protocol handlers now pass registry and log parameters to snooze/reboot handlers
+-Fixes Access Denied errors in corporate environments when snooze button clicked
+-Enables per-user state mode (HKCU) for multi-user scenarios
+-Maintained full backwards compatibility (defaults to HKLM)
+
 Version 2.2 - 12/02/2026
 -Added progressive snooze enforcement system with 5-stage escalation (0-4)
 -Added EnableProgressive parameter to enable opt-in progressive mode
@@ -87,7 +244,9 @@ CustomMessage.xml
 Specify the name of the XML file to read. The XML file must exist in the same directory as Toast_Notify.ps1. If no parameter is passed, it is assumed the XML file is called CustomMessage.xml.
 
 .PARAMETER Snooze
-Add a snooze option to the Toast
+Activates the progressive 5-stage snooze enforcement system. Registry tracks stage state (0-4).
+Stage 0: initial, Stages 1-2: progressively shorter snooze, Stage 3: final warning (no snooze),
+Stage 4: forced reboot notification. Without this switch: plain notification with Learn More + Dismiss only.
 
 .PARAMETER ToastScenario
 Specify the toast notification scenario type. Valid values:
@@ -95,16 +254,6 @@ Specify the toast notification scenario type. Valid values:
 - urgent: High priority, bypasses Focus Assist, standard notification sound
 - reminder: Persistent reminder, can be suppressed by Focus Assist, stays in Action Center
 - default: Standard notification behavior
-
-.PARAMETER EnableProgressive
-Enable progressive snooze enforcement with 5-stage escalation (0-4).
-When enabled, each snooze increments a counter stored in registry.
-Stage progression: 0 (initial) -> 1 -> 2 -> 3 (urgent) -> 4 (alarm/non-dismissible)
-Default: $false (classic single-snooze behavior)
-
-.PARAMETER SnoozeCount
-Current snooze count (0-4). Automatically managed via registry in progressive mode.
-Only used when EnableProgressive is $true.
 
 .PARAMETER Priority
 Set toast notification priority to High for Focus Assist bypass attempts.
@@ -115,6 +264,40 @@ Default: $false
 Composite switch that enables maximum visibility for critical alerts.
 Combines: Priority=High + ToastScenario=alarm + ensures action buttons.
 Default: $false
+
+.PARAMETER RegistryHive
+Registry hive for storing toast state: HKLM (machine-wide, default), HKCU (per-user), or Custom.
+HKLM requires Grant-RegistryPermissions for user access.
+HKCU provides per-user state with no elevation required.
+Default: HKLM
+
+.PARAMETER RegistryPath
+Custom registry path under the specified hive.
+Default: SOFTWARE\ToastNotification
+
+.PARAMETER WorkingDirectory
+Base directory for toast file structure. Creates organized layout with automatic subfolders:
+- {ToastGUID}\Logs\ - All transcript logs from Toast_Notify and handlers
+- {ToastGUID}\Scripts\ - Staged working copies of handler scripts
+Default: C:\ProgramData\ToastNotification
+Prevents bloat: Old toast folders automatically cleaned up after CleanupDaysThreshold days.
+
+.PARAMETER CleanupDaysThreshold
+Number of days before stale toast folders are automatically removed.
+Prevents accumulation of old toast instances in working directory.
+Default: 30 days
+
+.PARAMETER Dismiss
+Enable dismiss (X) button in top-right corner of toast notification.
+Default behavior (without this switch): Dismiss button HIDDEN - forces user to choose action (snooze/reboot).
+With this switch: Dismiss button VISIBLE - allows user to close notification without action.
+
+Use cases:
+- Default (no -Dismiss): Progressive enforcement, critical updates, ensures user engagement
+- With -Dismiss: Informational toasts, testing, optional notifications
+
+IMPORTANT: Stage 4 (final warning) should NEVER use -Dismiss to enforce reboot decision.
+Default: $false (dismiss button hidden)
 
 .EXAMPLE
 Toast_Notify.ps1 -XMLSource "PhoneSystemProblems.xml"
@@ -129,16 +312,28 @@ Toast_Notify.ps1 -ToastScenario "urgent"
 Toast_Notify.ps1 -XMLSource "Maintenance.xml" -ToastScenario "reminder" -Snooze
 
 .EXAMPLE
-Toast_Notify.ps1 -EnableProgressive -XMLSource "CustomMessage.xml"
-Enables progressive enforcement with stage-specific messages from XML
-
-.EXAMPLE
 Toast_Notify.ps1 -ForceDisplay -XMLSource "CriticalAlert.xml"
 Maximum visibility mode for critical notifications
 
 .EXAMPLE
-Toast_Notify.ps1 -EnableProgressive -SnoozeCount 2 -ToastGUID "ABC123"
-Displays Stage 2 toast (2 of 4 snoozes used) for specified GUID
+Toast_Notify.ps1 -Snooze -XMLSource "CustomMessage.xml"
+Stage-managed notification starting at Stage 0 (2-hour snooze interval)
+
+.EXAMPLE
+Toast_Notify.ps1 -Snooze -RegistryHive HKCU
+Per-user stage state stored in HKCU (no elevation required)
+
+.EXAMPLE
+Toast_Notify.ps1 -Snooze -WorkingDirectory "D:\CustomToasts"
+Custom working directory with organized folder structure: D:\CustomToasts\{GUID}\Logs\ and Scripts\
+
+.EXAMPLE
+Toast_Notify.ps1 -Snooze -WorkingDirectory "C:\ProgramData\Notifications" -CleanupDaysThreshold 7
+Custom location with aggressive cleanup (removes toast folders older than 7 days)
+
+.EXAMPLE
+Toast_Notify.ps1 -Dismiss -XMLSource "InformationalMessage.xml"
+Informational toast with dismiss button visible (user can close without action)
 #>
 
 [CmdletBinding()]
@@ -155,11 +350,6 @@ Param
     [ValidatePattern('^[A-F0-9\-]{1,36}$')]
     [String]$ToastGUID,
     [Parameter(Mandatory = $False)]
-    [Switch]$EnableProgressive,
-    [Parameter(Mandatory = $False)]
-    [ValidateRange(0, 4)]
-    [Int]$SnoozeCount = 0,
-    [Parameter(Mandatory = $False)]
     [Switch]$Priority,
     [Parameter(Mandatory = $False)]
     [Switch]$ForceDisplay,
@@ -167,7 +357,25 @@ Param
     [Switch]$TestMode,
     [Parameter(Mandatory = $False)]
     [ValidateRange(1, 1440)]
-    [Int]$RebootCountdownMinutes = 5
+    [Int]$RebootCountdownMinutes = 5,
+    [Parameter(Mandatory = $False)]
+    [ValidateSet('HKLM', 'HKCU', 'Custom')]
+    [String]$RegistryHive = 'HKLM',
+    [Parameter(Mandatory = $False)]
+    [ValidatePattern('^[a-zA-Z0-9_\\]+$')]
+    [String]$RegistryPath = 'SOFTWARE\ToastNotification',
+    [Parameter(Mandatory = $False)]
+    [ValidateScript({
+        if ([string]::IsNullOrWhiteSpace($_)) { return $true }
+        if ($_ -match '^[a-zA-Z]:\\.*$' -or $_ -match '^\\\\\w+\\.*$') { return $true }
+        throw "Invalid path format. Use local (C:\path) or UNC (\\server\share) paths only."
+    })]
+    [String]$WorkingDirectory = $null,
+    [Parameter(Mandatory = $False)]
+    [ValidateRange(1, 365)]
+    [Int]$CleanupDaysThreshold = 30,
+    [Parameter(Mandatory = $False)]
+    [Switch]$Dismiss = $false
 )
 
 #region Helper Functions
@@ -217,25 +425,39 @@ function Initialize-ToastRegistry {
         Creates registry structure for toast state persistence
     .PARAMETER ToastGUID
         Unique identifier for this toast instance
+    .PARAMETER RegistryHive
+        Registry hive to use (HKLM, HKCU, Custom)
+    .PARAMETER RegistryPath
+        Registry path under the hive (default: SOFTWARE\ToastNotification)
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
         [ValidatePattern('^[A-F0-9\-]{1,36}$')]
-        [String]$ToastGUID
+        [String]$ToastGUID,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateSet('HKLM', 'HKCU', 'Custom')]
+        [String]$RegistryHive = 'HKLM',
+
+        [Parameter(Mandatory = $false)]
+        [String]$RegistryPath = 'SOFTWARE\ToastNotification'
     )
 
-    $RegPath = "HKLM:\SOFTWARE\ToastNotification\$ToastGUID"
+    $RegPath = "${RegistryHive}:\${RegistryPath}\$ToastGUID"
+    $BasePath = "${RegistryHive}:\${RegistryPath}"
 
     try {
         # Create base path if not exists
-        if (!(Test-Path "HKLM:\SOFTWARE\ToastNotification")) {
-            New-Item -Path "HKLM:\SOFTWARE" -Name "ToastNotification" -Force | Out-Null
+        if (!(Test-Path $BasePath)) {
+            $ParentPath = Split-Path $BasePath -Parent
+            $LeafName = Split-Path $RegistryPath -Leaf
+            New-Item -Path $ParentPath -Name $LeafName -Force | Out-Null
         }
 
         # Create toast-specific path
         if (!(Test-Path $RegPath)) {
-            New-Item -Path "HKLM:\SOFTWARE\ToastNotification" -Name $ToastGUID -Force | Out-Null
+            New-Item -Path $BasePath -Name $ToastGUID -Force | Out-Null
             Write-Verbose "Registry path created: $RegPath"
         }
 
@@ -263,21 +485,97 @@ function Initialize-ToastRegistry {
     }
 }
 
+function Initialize-SnoozeTasks {
+    <#
+    .SYNOPSIS
+        No-op stub - task pre-creation removed in v2.23
+    .DESCRIPTION
+        This function previously pre-created 4 disabled scheduled tasks during SYSTEM deployment.
+        That approach failed across all principal types:
+
+        - GroupId S-1-5-32-545 (v2.14-v2.20): MSDN requires SeBatchLogonRight for ANY caller
+          invoking Set-ScheduledTask on GroupId tasks. Standard users lack SeBatchLogonRight.
+          Access denied regardless of task DACL grant.
+
+        - NT AUTHORITY\INTERACTIVE as UserId (v2.21): Task Scheduler XML schema rejects virtual
+          SID names as <UserId> element. Error: "(43,4):Task:" at registration time.
+
+        - InteractiveToken without UserId (v2.22): Task Scheduler SERVICE requires UserId even
+          for InteractiveToken principal type. Error: "No mapping between account names and
+          security IDs was done. (11,8):UserId:"
+
+        Secondary bug discovered: pre-created task action arguments were missing -XMLSource and
+        -ToastScenario. Toast_Notify.ps1 defaults to CustomMessage.xml which may not exist in
+        the staged directory. The snooze task would have failed to display even if it fired.
+
+        ARCHITECTURAL CHANGE (v2.23):
+        Tasks are now created dynamically in user context by Toast_Snooze_Handler.ps1 v1.9.
+        Standard users can always register tasks that run as themselves:
+            Register-ScheduledTask -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
+        This requires no SeBatchLogonRight and avoids all principal resolution failures.
+
+        XMLSource and ToastScenario are stored in HKLM registry by the SYSTEM deployment block
+        so the snooze handler can read them when building the task action arguments.
+
+        This stub exists only to satisfy the call site at the SYSTEM deployment block.
+        It always returns $true so the deployment block can log success without errors.
+    .PARAMETER ToastGUID
+        Unique identifier for this toast instance (unused - retained for call-site compatibility)
+    .PARAMETER ToastScriptPath
+        Full path to Toast_Notify.ps1 script (unused - retained for call-site compatibility)
+    .NOTES
+        Version 2.23: Task pre-creation removed. Tasks created dynamically by
+        Toast_Snooze_Handler.ps1 v1.9 at snooze time using user's own credentials.
+        Users create tasks with -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited.
+        No SeBatchLogonRight needed. No principal resolution failures.
+
+        ISO 27001 A.9.4.1: Dynamic user-context task creation is least privilege -
+        each user's snooze task runs only as that specific user, never as a group or
+        interactive session that could span multiple users.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^[A-F0-9\-]{1,36}$')]
+        [String]$ToastGUID,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateScript({ Test-Path $_ })]
+        [String]$ToastScriptPath
+    )
+
+    Write-Output "Pre-creating snooze scheduled tasks... [SKIPPED - tasks created dynamically in user context v2.23]"
+    Write-Output "[OK] Task pre-creation bypassed - Toast_Snooze_Handler.ps1 v1.9 creates tasks at snooze time"
+    Write-Output "     Standard users create tasks with their own credentials (no SeBatchLogonRight needed)"
+    return $true
+}
+
 function Get-ToastState {
     <#
     .SYNOPSIS
         Reads current toast state from registry
     .PARAMETER ToastGUID
         Unique identifier for this toast instance
+    .PARAMETER RegistryHive
+        Registry hive to use (HKLM, HKCU, Custom)
+    .PARAMETER RegistryPath
+        Registry path under the hive (default: SOFTWARE\ToastNotification)
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
         [ValidatePattern('^[A-F0-9\-]{1,36}$')]
-        [String]$ToastGUID
+        [String]$ToastGUID,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateSet('HKLM', 'HKCU', 'Custom')]
+        [String]$RegistryHive = 'HKLM',
+
+        [Parameter(Mandatory = $false)]
+        [String]$RegistryPath = 'SOFTWARE\ToastNotification'
     )
 
-    $RegPath = "HKLM:\SOFTWARE\ToastNotification\$ToastGUID"
+    $RegPath = "${RegistryHive}:\${RegistryPath}\$ToastGUID"
 
     try {
         if (Test-Path $RegPath) {
@@ -306,6 +604,10 @@ function Set-ToastState {
         Current snooze count
     .PARAMETER LastInterval
         Last selected snooze interval
+    .PARAMETER RegistryHive
+        Registry hive to use (HKLM, HKCU, Custom)
+    .PARAMETER RegistryPath
+        Registry path under the hive (default: SOFTWARE\ToastNotification)
     #>
     [CmdletBinding()]
     param(
@@ -319,10 +621,17 @@ function Set-ToastState {
 
         [Parameter(Mandatory = $false)]
         [ValidateSet("", "15m", "30m", "1h", "2h", "4h", "eod")]
-        [String]$LastInterval = ""
+        [String]$LastInterval = "",
+
+        [Parameter(Mandatory = $false)]
+        [ValidateSet('HKLM', 'HKCU', 'Custom')]
+        [String]$RegistryHive = 'HKLM',
+
+        [Parameter(Mandatory = $false)]
+        [String]$RegistryPath = 'SOFTWARE\ToastNotification'
     )
 
-    $RegPath = "HKLM:\SOFTWARE\ToastNotification\$ToastGUID"
+    $RegPath = "${RegistryHive}:\${RegistryPath}\$ToastGUID"
 
     try {
         Set-ItemProperty -Path $RegPath -Name "SnoozeCount" -Value $SnoozeCount -Type DWord
@@ -343,6 +652,223 @@ function Set-ToastState {
     catch {
         Write-Warning "Failed to update registry state: $($_.Exception.Message)"
         return $false
+    }
+}
+
+function Grant-RegistryPermissions {
+    <#
+    .SYNOPSIS
+        Grants USERS group write permissions to SPECIFIC toast registry path only
+    .DESCRIPTION
+        SECURITY SCOPE: Permissions are ONLY granted to the specific ToastGUID path:
+        HKLM:\SOFTWARE\ToastNotification\{ToastGUID}
+
+        NOT granted to:
+        - HKLM:\SOFTWARE\ToastNotification (parent)
+        - HKLM:\SOFTWARE (entire software hive)
+        - HKLM:\ (entire registry)
+
+        This allows snooze handler to update only this toast instance's state
+        from user context while maintaining security elsewhere.
+    .PARAMETER RegistryPath
+        Full registry path to specific toast instance
+        Example: HKLM:\SOFTWARE\ToastNotification\ABC-123-DEF-456
+    .EXAMPLE
+        Grant-RegistryPermissions -RegistryPath "HKLM:\SOFTWARE\ToastNotification\ABC-123"
+        Grants USERS write access ONLY to the ABC-123 toast instance path
+    .NOTES
+        Security validation ensures only ToastNotification\{GUID} paths can be modified
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^HKLM:\\SOFTWARE\\ToastNotification\\[A-F0-9\-]{1,36}$')]
+        [String]$RegistryPath
+    )
+
+    try {
+        Write-Verbose "SECURITY: Granting permissions to SPECIFIC path only: $RegistryPath"
+
+        # Get current ACL for this specific path
+        $Acl = Get-Acl -Path $RegistryPath
+
+        # Create access rule for USERS group (S-1-5-32-545)
+        # InheritanceFlags: ContainerInherit, ObjectInherit (only affects subkeys under THIS path)
+        # PropagationFlags: None (does NOT propagate to parent or sibling keys)
+        $Rule = New-Object System.Security.AccessControl.RegistryAccessRule(
+            "BUILTIN\Users",
+            "FullControl",
+            "ContainerInherit,ObjectInherit",
+            "None",
+            "Allow"
+        )
+
+        # Add rule and apply to THIS PATH ONLY
+        $Acl.AddAccessRule($Rule)
+        Set-Acl -Path $RegistryPath -AclObject $Acl
+
+        # Verify scope - ensure parent path permissions unchanged
+        $ParentPath = "HKLM:\SOFTWARE\ToastNotification"
+        if (Test-Path $ParentPath) {
+            $ParentAcl = Get-Acl -Path $ParentPath
+            $ParentUserRules = $ParentAcl.Access | Where-Object { $_.IdentityReference -eq "BUILTIN\Users" }
+            if ($ParentUserRules.Count -eq 0) {
+                Write-Verbose "SECURITY VERIFIED: Parent path still protected (no USERS write access)"
+            }
+        }
+
+        Write-Output "[OK] Registry permissions granted to USERS group for THIS PATH ONLY: $RegistryPath"
+        Write-Output "[OK] Parent path (SOFTWARE\ToastNotification) remains protected"
+        return $true
+    }
+    catch {
+        Write-Warning "Failed to grant registry permissions: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Initialize-ToastFolderStructure {
+    <#
+    .SYNOPSIS
+        Creates standardized folder structure for toast operations
+    .DESCRIPTION
+        Establishes consistent directory layout:
+        BaseDirectory\
+        ├── Logs\           (transcript logs from all components)
+        ├── Scripts\        (staged working copies of handlers)
+        └── (future: Registry backups)
+    .PARAMETER BaseDirectory
+        Root directory for toast file structure
+        Default: C:\ProgramData\ToastNotification
+    .PARAMETER ToastGUID
+        Toast instance GUID for unique path
+    .EXAMPLE
+        Initialize-ToastFolderStructure -BaseDirectory "C:\ProgramData\ToastNotification" -ToastGUID "ABC-123"
+        Creates: C:\ProgramData\ToastNotification\ABC-123\Logs\ and Scripts\ subdirectories
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [String]$BaseDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^[A-F0-9\-]{1,36}$')]
+        [String]$ToastGUID
+    )
+
+    try {
+        # Create base directory structure
+        $BasePath = Join-Path $BaseDirectory $ToastGUID
+        $Paths = @{
+            Base    = $BasePath
+            Logs    = Join-Path $BasePath "Logs"
+            Scripts = Join-Path $BasePath "Scripts"
+        }
+
+        foreach ($PathName in $Paths.Keys) {
+            $Path = $Paths[$PathName]
+            if (!(Test-Path $Path)) {
+                Write-Verbose "Creating directory: $Path"
+                New-Item -Path $Path -ItemType Directory -Force | Out-Null
+            }
+        }
+
+        Write-Verbose "Folder structure created: $($Paths.Base)"
+        Write-Verbose "  - Logs:    $($Paths.Logs)"
+        Write-Verbose "  - Scripts: $($Paths.Scripts)"
+
+        # Return only the hashtable (no Write-Output to avoid array return)
+        return $Paths
+    }
+    catch {
+        Write-Error "Failed to create folder structure: $($_.Exception.Message)"
+        throw
+    }
+}
+
+function Remove-StaleToastFolders {
+    <#
+    .SYNOPSIS
+        Removes old toast instance folders to prevent bloat
+    .DESCRIPTION
+        Scans the base directory for toast GUID folders and removes those older than
+        the specified threshold. This prevents accumulation of old toast instances.
+
+        Folder age is determined by the most recent file modification time within the folder.
+    .PARAMETER BaseDirectory
+        Root directory containing toast GUID folders
+    .PARAMETER DaysThreshold
+        Remove folders with no file modifications in this many days (default: 30)
+    .EXAMPLE
+        Remove-StaleToastFolders -BaseDirectory "C:\ProgramData\ToastNotification" -DaysThreshold 30
+        Removes toast folders older than 30 days
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [String]$BaseDirectory,
+
+        [Parameter(Mandatory = $false)]
+        [Int]$DaysThreshold = 30
+    )
+
+    try {
+        if (!(Test-Path $BaseDirectory)) {
+            Write-Verbose "Base directory does not exist, skipping cleanup: $BaseDirectory"
+            return
+        }
+
+        $CutoffDate = (Get-Date).AddDays(-$DaysThreshold)
+        Write-Verbose "Cleaning up toast folders older than $CutoffDate"
+
+        # Get all subdirectories (each should be a GUID folder)
+        $ToastFolders = Get-ChildItem -Path $BaseDirectory -Directory -ErrorAction SilentlyContinue
+
+        $RemovedCount = 0
+        foreach ($Folder in $ToastFolders) {
+            try {
+                # Check if folder name looks like a GUID (basic validation)
+                if ($Folder.Name -notmatch '^[A-F0-9\-]{1,36}$') {
+                    Write-Verbose "Skipping non-GUID folder: $($Folder.Name)"
+                    continue
+                }
+
+                # Get most recent file modification time in folder (recursive)
+                $LatestFile = Get-ChildItem -Path $Folder.FullName -File -Recurse -ErrorAction SilentlyContinue |
+                              Sort-Object LastWriteTime -Descending |
+                              Select-Object -First 1
+
+                if ($LatestFile) {
+                    if ($LatestFile.LastWriteTime -lt $CutoffDate) {
+                        Write-Output "[CLEANUP] Removing stale toast folder: $($Folder.Name) (last modified: $($LatestFile.LastWriteTime))"
+                        Remove-Item -Path $Folder.FullName -Recurse -Force -ErrorAction Stop
+                        $RemovedCount++
+                    }
+                }
+                else {
+                    # Empty folder or no files - remove if folder itself is old
+                    if ($Folder.LastWriteTime -lt $CutoffDate) {
+                        Write-Output "[CLEANUP] Removing empty toast folder: $($Folder.Name)"
+                        Remove-Item -Path $Folder.FullName -Recurse -Force -ErrorAction Stop
+                        $RemovedCount++
+                    }
+                }
+            }
+            catch {
+                Write-Warning "Failed to delete toast folder $($Folder.Name): $($_.Exception.Message)"
+                Write-Verbose "This may indicate locked files in: $($Folder.FullName)"
+            }
+        }
+
+        if ($RemovedCount -gt 0) {
+            Write-Output "[OK] Cleanup complete: Removed $RemovedCount stale toast folder(s)"
+        }
+        else {
+            Write-Verbose "No stale folders found for cleanup"
+        }
+    }
+    catch {
+        Write-Warning "Folder cleanup failed: $($_.Exception.Message)"
     }
 }
 
@@ -405,10 +931,12 @@ function Get-StageDetails {
             $StageConfig.VisualUrgency = "Normal"
         }
         3 {
+            # Stage 3: FINAL WARNING - No snooze allowed
+            # User must decide: Reboot Now or Dismiss (transitions to Stage 4 on next run)
             $StageConfig.Stage = 3
             $StageConfig.Scenario = "urgent"
-            $StageConfig.SnoozeInterval = "15m"
-            $StageConfig.AllowDismiss = $true
+            $StageConfig.SnoozeInterval = ""  # No snooze at Stage 3 (final warning)
+            $StageConfig.AllowDismiss = $true  # Can dismiss, but next snooze attempt goes to Stage 4
             $StageConfig.AudioLoop = $true
             $StageConfig.VisualUrgency = "Urgent"
         }
@@ -421,7 +949,7 @@ function Get-StageDetails {
             $StageConfig.VisualUrgency = "Critical"
         }
         default {
-            # Fallback to Stage 0
+            # Default to Stage 0
             $StageConfig.Stage = 0
             $StageConfig.Scenario = "reminder"
             $StageConfig.SnoozeInterval = "2h"
@@ -472,7 +1000,7 @@ function Get-StageEventText {
             return $StageNode.InnerText.Trim()
         }
         else {
-            # Fallback to Stage0 if specific stage node missing
+            # Use Stage0 if specific stage node missing
             Write-Verbose "Stage$StageNumber not found, using Stage0 text from XML"
             return $EventTextNode.Stage0.InnerText.Trim()
         }
@@ -615,7 +1143,6 @@ function Test-CorporateEnvironment {
         $CorpEnv = Test-CorporateEnvironment
         if ($CorpEnv.IsRestricted) {
             Write-Warning "Restrictions: $($CorpEnv.Restrictions -join ', ')"
-            Write-Warning "Recommended fallback: $($CorpEnv.RecommendedFallback)"
         }
     #>
     [CmdletBinding()]
@@ -627,7 +1154,6 @@ function Test-CorporateEnvironment {
         CanWriteHKCU = $true
         WinRTAvailable = $true
         NotificationSystemEnabled = $true
-        RecommendedFallback = 'None'
     }
 
     # Test 1: HKCU write capability (GPO restrictions)
@@ -683,22 +1209,8 @@ function Test-CorporateEnvironment {
         Write-Verbose "Notification system test: UNKNOWN"
     }
 
-    # Determine recommended fallback method
+    # Log corporate restrictions if detected
     if ($Result.IsRestricted) {
-        # Check user context
-        $IsInteractive = [Environment]::UserInteractive
-        $IsSystem = ([System.Security.Principal.WindowsIdentity]::GetCurrent()).Name -eq "NT AUTHORITY\SYSTEM"
-
-        if ($IsInteractive -and -not $IsSystem) {
-            $Result.RecommendedFallback = 'MessageBox'
-        }
-        elseif (-not $IsSystem) {
-            $Result.RecommendedFallback = 'EventLog'
-        }
-        else {
-            $Result.RecommendedFallback = 'LogFile'
-        }
-
         Write-Verbose "Corporate restrictions detected: $($Result.Restrictions.Count) restriction(s)"
     }
 
@@ -757,156 +1269,6 @@ function Test-WinRTAssemblies {
     }
 }
 
-function Show-FallbackNotification {
-    <#
-    .SYNOPSIS
-        Displays notification when toast fails using fallback methods
-    .DESCRIPTION
-        Implements 3-tier fallback: MessageBox -> EventLog -> LogFile
-        Auto-detects user context and selects appropriate method.
-    .PARAMETER Title
-        Notification title
-    .PARAMETER Message
-        Notification content
-    .PARAMETER Method
-        'MessageBox', 'EventLog', 'LogFile', or 'Auto' (default: Auto)
-    .PARAMETER Severity
-        'Information', 'Warning', 'Error' (default: Warning)
-    .EXAMPLE
-        Show-FallbackNotification -Title "Update Required" -Message "Please restart" -Method Auto -Severity Warning
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        [String]$Title,
-
-        [Parameter(Mandatory = $true)]
-        [String]$Message,
-
-        [Parameter(Mandatory = $false)]
-        [ValidateSet('MessageBox', 'EventLog', 'LogFile', 'Auto')]
-        [String]$Method = 'Auto',
-
-        [Parameter(Mandatory = $false)]
-        [ValidateSet('Information', 'Warning', 'Error')]
-        [String]$Severity = 'Warning'
-    )
-
-    $FallbackSucceeded = $false
-
-    # Auto-detect method if requested
-    if ($Method -eq 'Auto') {
-        $IsInteractive = [Environment]::UserInteractive
-        $IsSystem = ([System.Security.Principal.WindowsIdentity]::GetCurrent()).Name -eq "NT AUTHORITY\SYSTEM"
-
-        if ($IsInteractive -and -not $IsSystem) {
-            $Method = 'MessageBox'
-        }
-        elseif (-not $IsSystem) {
-            $Method = 'EventLog'
-        }
-        else {
-            $Method = 'LogFile'
-        }
-        Write-Verbose "Auto-selected fallback method: $Method"
-    }
-
-    # Attempt primary method
-    switch ($Method) {
-        'MessageBox' {
-            try {
-                Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
-
-                $Icon = switch ($Severity) {
-                    'Error' { [System.Windows.Forms.MessageBoxIcon]::Error }
-                    'Warning' { [System.Windows.Forms.MessageBoxIcon]::Warning }
-                    default { [System.Windows.Forms.MessageBoxIcon]::Information }
-                }
-
-                [System.Windows.Forms.MessageBox]::Show($Message, $Title, [System.Windows.Forms.MessageBoxButtons]::OK, $Icon) | Out-Null
-                Write-Output "[OK] Fallback notification displayed via MessageBox"
-                $FallbackSucceeded = $true
-            }
-            catch {
-                Write-Warning "MessageBox fallback failed: $($_.Exception.Message)"
-                Write-Warning "Cascading to EventLog..."
-                $Method = 'EventLog'
-            }
-        }
-    }
-
-    # Cascade to EventLog if MessageBox failed
-    if (-not $FallbackSucceeded -and $Method -eq 'EventLog') {
-        try {
-            $EventLogSource = "ToastNotification"
-
-            # Check if event source exists
-            if (-not [System.Diagnostics.EventLog]::SourceExists($EventLogSource)) {
-                # Try to create it (requires admin rights)
-                try {
-                    New-EventLog -LogName Application -Source $EventLogSource -ErrorAction Stop
-                    Write-Verbose "Created event source: $EventLogSource"
-                }
-                catch {
-                    Write-Warning "Cannot create event source (requires admin): $($_.Exception.Message)"
-                    Write-Warning "Cascading to LogFile..."
-                    $Method = 'LogFile'
-                }
-            }
-
-            if ([System.Diagnostics.EventLog]::SourceExists($EventLogSource)) {
-                $EventType = switch ($Severity) {
-                    'Error' { 'Error' }
-                    'Warning' { 'Warning' }
-                    default { 'Information' }
-                }
-
-                $EventMessage = "$Title`n`n$Message"
-                Write-EventLog -LogName Application -Source $EventLogSource -EntryType $EventType -EventId 1000 -Message $EventMessage -ErrorAction Stop
-
-                Write-Output "[OK] Fallback notification logged to Event Log"
-                $FallbackSucceeded = $true
-            }
-        }
-        catch {
-            Write-Warning "EventLog fallback failed: $($_.Exception.Message)"
-            Write-Warning "Cascading to LogFile..."
-            $Method = 'LogFile'
-        }
-    }
-
-    # Final cascade to LogFile (always succeeds)
-    if (-not $FallbackSucceeded -and $Method -eq 'LogFile') {
-        try {
-            $LogDir = Join-Path $env:ProgramData "ToastNotification\Logs"
-            if (-not (Test-Path $LogDir)) {
-                New-Item -Path $LogDir -ItemType Directory -Force | Out-Null
-            }
-
-            $LogFile = Join-Path $LogDir "FallbackNotifications.log"
-            $Timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-            $LogEntry = @"
-
-========================================
-[$Timestamp] [$Severity] $Title
-========================================
-$Message
-========================================
-
-"@
-            Add-Content -Path $LogFile -Value $LogEntry -Force
-            Write-Output "[OK] Fallback notification written to log: $LogFile"
-            $FallbackSucceeded = $true
-        }
-        catch {
-            Write-Error "All fallback methods failed: $($_.Exception.Message)"
-            $FallbackSucceeded = $false
-        }
-    }
-
-    return $FallbackSucceeded
-}
-
 #endregion Helper Functions
 
 #Set Unique GUID for the Toast
@@ -922,20 +1284,36 @@ If ($ForceDisplay) {
     Write-Warning "ForceDisplay cannot guarantee Focus Assist bypass on all systems"
 }
 
-#Validate progressive mode parameters
-If ($EnableProgressive) {
-    Write-Verbose "Progressive mode enabled - validating SnoozeCount parameter"
-    if ($SnoozeCount -lt 0 -or $SnoozeCount -gt 4) {
-        throw "SnoozeCount must be between 0 and 4 when EnableProgressive is enabled"
-    }
-}
-
 #Current Directory
 $ScriptPath = $MyInvocation.MyCommand.Path
 $CurrentDir = Split-Path $ScriptPath
 
-#Set Toast Path to UserProfile Temp Directory
-$ToastPath = (Join-Path $ENV:Windir "Temp\$($ToastGuid)")
+#Determine base working directory
+if ([string]::IsNullOrWhiteSpace($WorkingDirectory)) {
+    # Default: C:\ProgramData\ToastNotification
+    $BaseDirectory = "C:\ProgramData\ToastNotification"
+}
+else {
+    # Custom working directory
+    $BaseDirectory = $WorkingDirectory
+}
+
+# Cleanup stale toast folders to prevent bloat (runs in SYSTEM context only)
+if (([System.Security.Principal.WindowsIdentity]::GetCurrent()).Name -eq "NT AUTHORITY\SYSTEM") {
+    Remove-StaleToastFolders -BaseDirectory $BaseDirectory -DaysThreshold $CleanupDaysThreshold
+}
+
+# Initialize folder structure for this toast instance
+$FolderStructure = Initialize-ToastFolderStructure -BaseDirectory $BaseDirectory -ToastGUID $ToastGUID
+
+# Set paths for use throughout script
+$ToastPath = $FolderStructure.Scripts  # Scripts staged to Scripts subfolder
+$LogPath = Join-Path $FolderStructure.Logs "Toast_Notify_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+Start-Transcript -Path $LogPath -Append
+
+Write-Output "[OK] Working directory: $($FolderStructure.Base)"
+Write-Output "[OK] Scripts staged to: $($FolderStructure.Scripts)"
+Write-Output "[OK] Logs saved to: $($FolderStructure.Logs)"
 
 #Validate ToastScenario parameter (defensive check)
 if ($ToastScenario -notin @('alarm', 'urgent', 'reminder', 'default')) {
@@ -988,10 +1366,10 @@ If ($XMLValid -eq $True) {
 
         Write-Output "Running in SYSTEM context - Initializing deployment..."
 
-        #Initialize Registry State if progressive mode enabled
-        If ($EnableProgressive) {
+        #Initialize Registry State if snooze mode enabled
+        If ($Snooze) {
             Write-Output "Initializing registry for ToastGUID: $ToastGUID"
-            $RegInitResult = Initialize-ToastRegistry -ToastGUID $ToastGUID
+            $RegInitResult = Initialize-ToastRegistry -ToastGUID $ToastGUID -RegistryHive $RegistryHive -RegistryPath $RegistryPath
             if (!$RegInitResult) {
                 Write-Error "CRITICAL: Registry initialization failed"
                 Write-Error "Toast state will not persist across snoozes"
@@ -999,13 +1377,64 @@ If ($XMLValid -eq $True) {
             }
 
             # Verify registry was created and readable
-            $RegVerify = Get-ToastState -ToastGUID $ToastGUID
+            $RegVerify = Get-ToastState -ToastGUID $ToastGUID -RegistryHive $RegistryHive -RegistryPath $RegistryPath
             if (!$RegVerify) {
                 Write-Error "CRITICAL: Registry created but not readable"
                 throw "Registry verification failed"
             }
 
             Write-Output "Registry initialization verified: SnoozeCount=$($RegVerify.SnoozeCount)"
+
+            # Store XMLSource and ToastScenario in registry for snooze handler to read.
+            # Snooze handler (v1.9) creates task action arguments dynamically using these values.
+            # Without this, the snooze task would default to CustomMessage.xml which may not
+            # exist in the staged directory and the re-displayed toast would fail silently.
+            Write-Output "Storing XMLSource and ToastScenario in registry for snooze handler..."
+            try {
+                $ErrorActionPreference = 'Stop'
+                Set-ItemProperty -Path "${RegistryHive}:\${RegistryPath}\$ToastGUID" `
+                    -Name "XMLSource" -Value $XMLSource -Type String
+                Set-ItemProperty -Path "${RegistryHive}:\${RegistryPath}\$ToastGUID" `
+                    -Name "ToastScenario" -Value $ToastScenario -Type String
+                Write-Output "[OK] XMLSource stored: $XMLSource"
+                Write-Output "[OK] ToastScenario stored: $ToastScenario"
+            }
+            catch {
+                Write-Warning "Failed to store XMLSource/ToastScenario in registry: $($_.Exception.Message)"
+                Write-Warning "Snooze tasks may default to CustomMessage.xml"
+            }
+
+            # Grant permissions if using HKLM (machine-wide state)
+            if ($RegistryHive -eq 'HKLM') {
+                Write-Output "Granting USERS group permissions to registry path for snooze handler..."
+                $RegPath = "HKLM:\${RegistryPath}\$ToastGUID"
+                $PermissionResult = Grant-RegistryPermissions -RegistryPath $RegPath
+                if ($PermissionResult) {
+                    Write-Output "[OK] Registry permissions granted - Snooze handler will work from user context"
+                }
+                else {
+                    Write-Warning "Permission grant failed - Snooze may not work from user context"
+                    Write-Warning "Consider deploying with -RegistryHive HKCU for per-user state"
+                }
+            }
+            elseif ($RegistryHive -eq 'HKCU') {
+                Write-Output "Using HKCU mode - No permission grant needed (per-user state)"
+            }
+
+            # Pre-create snooze scheduled tasks (enterprise solution for standard user permissions)
+            Write-Output "Pre-creating snooze scheduled tasks..."
+            $TaskInitResult = Initialize-SnoozeTasks -ToastGUID $ToastGUID -ToastScriptPath $ScriptPath
+            # Initialize-SnoozeTasks writes Write-Output strings before returning $true/$false.
+            # PowerShell captures ALL output (strings + boolean) into the array $TaskInitResult.
+            # Select-Object -Last 1 extracts the boolean return value from the end of the array.
+            $TaskInitSuccess = ($TaskInitResult | Select-Object -Last 1) -eq $true
+            if ($TaskInitSuccess) {
+                Write-Output "[OK] Snooze tasks pre-created - standard users can now activate them"
+            }
+            else {
+                Write-Warning "Snooze task pre-creation failed - users may encounter Access Denied errors"
+                Write-Warning "Progressive snooze functionality may not work correctly"
+            }
 
             # Register toast-snooze:// protocol handler in HKEY_CLASSES_ROOT
             Write-Output "Registering toast-snooze:// protocol handler..."
@@ -1045,11 +1474,11 @@ If ($XMLValid -eq $True) {
             }
         }
 
-        #Prepare to stage Toast Notification Content in %TEMP% Folder
+        #Prepare to stage Toast Notification Content in Scripts subfolder
         Try {
 
-            #Create TEMP folder to stage Toast Notification Content in %TEMP% Folder
-            New-Item $ToastPath -ItemType Directory -Force -ErrorAction Continue | Out-Null
+            # Folder structure already created by Initialize-ToastFolderStructure
+            # $ToastPath now points to Scripts subfolder
 
             # Only copy toast-related files (not Claude workspace files or directories)
             $FileExtensions = @('*.ps1', '*.jpg', '*.xml', '*.png', '*.txt')
@@ -1074,12 +1503,14 @@ If ($XMLValid -eq $True) {
         $New_ToastPath = Join-Path $ToastPath "Toast_Notify.ps1"
 
         # Update protocol handler command now that files are staged
-        If ($EnableProgressive) {
+        If ($Snooze) {
             try {
                 $HandlerPath = Join-Path $ToastPath "Toast_Snooze_Handler.ps1"
                 $CommandKey = "Registry::HKEY_CLASSES_ROOT\toast-snooze\shell\open\command"
 
-                $CommandValue = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$HandlerPath`" -ProtocolUri `"%1`""
+                # Build command with registry and log parameters
+                $CommandParams = "-ProtocolUri `"%1`" -RegistryHive $RegistryHive -RegistryPath `"$RegistryPath`" -LogDirectory `"$($FolderStructure.Logs)`""
+                $CommandValue = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$HandlerPath`" $CommandParams"
                 Set-ItemProperty -Path $CommandKey -Name "(Default)" -Value $CommandValue -Force
 
                 Write-Output "Protocol handler command registered: $CommandValue"
@@ -1117,12 +1548,45 @@ If ($XMLValid -eq $True) {
                     New-Item -Path "$RebootProtocolKey\shell\open" -Name "command" -Force | Out-Null
                 }
 
-                # Set command to Toast_Reboot_Handler.ps1
+                # Set command to Toast_Reboot_Handler.ps1 with log directory
                 $RebootHandlerPath = Join-Path $ToastPath "Toast_Reboot_Handler.ps1"
-                $RebootCommandValue = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$RebootHandlerPath`" -ProtocolUri `"%1`""
+                $RebootCmdParams = "-ProtocolUri `"%1`" -RegistryHive $RegistryHive -RegistryPath `"$RegistryPath`" -LogDirectory `"$($FolderStructure.Logs)`""
+                $RebootCommandValue = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$RebootHandlerPath`" $RebootCmdParams"
                 Set-ItemProperty -Path $RebootCommandKey -Name "(Default)" -Value $RebootCommandValue -Force
 
                 Write-Output "toast-reboot:// protocol registered: $RebootCommandValue"
+
+                # Register toast-dismiss:// protocol handler (for Stages 0-3 "Dismiss" button)
+                Write-Output "Registering toast-dismiss:// protocol handler..."
+                $DismissProtocolKey = "Registry::HKEY_CLASSES_ROOT\toast-dismiss"
+
+                # Create protocol key
+                if (!(Test-Path $DismissProtocolKey)) {
+                    New-Item -Path "Registry::HKEY_CLASSES_ROOT" -Name "toast-dismiss" -Force | Out-Null
+                }
+
+                Set-ItemProperty -Path $DismissProtocolKey -Name "(Default)" -Value "URL:Toast Dismiss Protocol" -Force
+                Set-ItemProperty -Path $DismissProtocolKey -Name "URL Protocol" -Value "" -Force
+
+                # Create shell\open\command structure
+                $DismissCommandKey = "$DismissProtocolKey\shell\open\command"
+                if (!(Test-Path "$DismissProtocolKey\shell")) {
+                    New-Item -Path $DismissProtocolKey -Name "shell" -Force | Out-Null
+                }
+                if (!(Test-Path "$DismissProtocolKey\shell\open")) {
+                    New-Item -Path "$DismissProtocolKey\shell" -Name "open" -Force | Out-Null
+                }
+                if (!(Test-Path $DismissCommandKey)) {
+                    New-Item -Path "$DismissProtocolKey\shell\open" -Name "command" -Force | Out-Null
+                }
+
+                # Set command to Toast_Dismiss_Handler.ps1 with log directory
+                $DismissHandlerPath = Join-Path $ToastPath "Toast_Dismiss_Handler.ps1"
+                $DismissCmdParams = "-ProtocolUri `"%1`" -RegistryHive $RegistryHive -RegistryPath `"$RegistryPath`" -LogDirectory `"$($FolderStructure.Logs)`""
+                $DismissCommandValue = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$DismissHandlerPath`" $DismissCmdParams"
+                Set-ItemProperty -Path $DismissCommandKey -Name "(Default)" -Value $DismissCommandValue -Force
+
+                Write-Output "toast-dismiss:// protocol registered: $DismissCommandValue"
             }
             catch {
                 Write-Warning "Failed to update protocol handler command: $($_.Exception.Message)"
@@ -1138,9 +1602,6 @@ If ($XMLValid -eq $True) {
         If ($Snooze) {
             $TaskArguments += " -Snooze"
         }
-        If ($EnableProgressive) {
-            $TaskArguments += " -EnableProgressive -SnoozeCount 0"
-        }
         If ($Priority) {
             $TaskArguments += " -Priority"
         }
@@ -1151,62 +1612,42 @@ If ($XMLValid -eq $True) {
         $Task_Trigger = New-ScheduledTaskTrigger -Once -At $Task_TimeToRun
         $Task_Trigger.EndBoundary = $Task_Expiry
         $Task_Principal = New-ScheduledTaskPrincipal -GroupId "S-1-5-32-545" -RunLevel Limited
-        $Task_Settings = New-ScheduledTaskSettingsSet -Compatibility V1 -DeleteExpiredTaskAfter (New-TimeSpan -Seconds 600) -AllowStartIfOnBatteries
+        $Task_Settings = New-ScheduledTaskSettingsSet `
+            -Compatibility Win8 `
+            -AllowStartIfOnBatteries `
+            -DontStopIfGoingOnBatteries `
+            -DeleteExpiredTaskAfter (New-TimeSpan -Days 30)
         $New_Task = New-ScheduledTask -Description "Toast_Notification_$($ToastGuid) Task for user notification. Title: $($EventTitle) :: Event:$($EventText) :: Source Path: $($ToastPath) " -Action $Task_Action -Principal $Task_Principal -Trigger $Task_Trigger -Settings $Task_Settings
         Register-ScheduledTask -TaskName "Toast_Notification_$($ToastGuid)" -InputObject $New_Task
+
+        Stop-Transcript
     }
 
     #Run the toast of the script is running in the context of the Logged On User
     If (!(([System.Security.Principal.WindowsIdentity]::GetCurrent()).Name -eq "NT AUTHORITY\SYSTEM")) {
 
-        $Log = (Join-Path $ENV:Windir "Temp\$($ToastGuid).log")
-        Start-Transcript $Log
-
         Write-Output "========================================="
         Write-Output "Toast Notification - User Context Execution"
         Write-Output "ToastGUID: $ToastGUID"
-        Write-Output "EnableProgressive: $EnableProgressive"
-        Write-Output "SnoozeCount Parameter: $SnoozeCount"
+        Write-Output "Snooze (Stage Mode): $Snooze"
         Write-Output "Priority: $Priority"
         Write-Output "ForceDisplay: $ForceDisplay"
         Write-Output "Timestamp: $(Get-Date -Format 's')"
         Write-Output "========================================="
+        $SnoozeCount = 0  # Will be read from registry if -Snooze is active
 
-        #Handle progressive mode - read authoritative SnoozeCount from registry
-        If ($EnableProgressive) {
-            $RegState = Get-ToastState -ToastGUID $ToastGUID
+        #Handle snooze mode - read authoritative SnoozeCount from registry
+        If ($Snooze) {
+            $RegState = Get-ToastState -ToastGUID $ToastGUID -RegistryHive $RegistryHive -RegistryPath $RegistryPath
             if ($RegState) {
-                $RegistrySnoozeCount = $RegState.SnoozeCount
-                Write-Output "Registry SnoozeCount: $RegistrySnoozeCount"
-                Write-Output "Parameter SnoozeCount: $SnoozeCount"
-
-                # CRITICAL: Validate registry matches parameter (detect desynchronization)
-                if ($RegistrySnoozeCount -ne $SnoozeCount) {
-                    Write-Warning "Registry/parameter mismatch detected!"
-                    Write-Warning "  Registry: $RegistrySnoozeCount"
-                    Write-Warning "  Parameter: $SnoozeCount"
-
-                    if ($TestMode) {
-                        Write-Warning "[TEST MODE] Using parameter value instead of registry for testing"
-                    }
-                    else {
-                        Write-Warning "Using registry value as authoritative source"
-                        $SnoozeCount = $RegistrySnoozeCount
-                    }
-                }
-                else {
-                    $SnoozeCount = $RegistrySnoozeCount
-                }
-
-                Write-Output "Using SnoozeCount: $SnoozeCount (Source: $(if($TestMode){'Parameter (TestMode)'}else{'Registry'}))"
+                $SnoozeCount = $RegState.SnoozeCount
+                Write-Output "Registry SnoozeCount: $SnoozeCount (Source: Registry)"
             }
             else {
-                Write-Warning "Registry state not found for ToastGUID: $ToastGUID"
-                Write-Warning "This may indicate first run or registry initialization failure"
-                Write-Warning "Using parameter value: $SnoozeCount"
+                Write-Warning "Registry state not found for ToastGUID: $ToastGUID - using default SnoozeCount: 0"
             }
 
-            # Early validation for SnoozeCount range
+            # Validate range (detect registry corruption)
             if ($SnoozeCount -lt 0 -or $SnoozeCount -gt 4) {
                 Write-Error "CRITICAL: Invalid SnoozeCount from registry: $SnoozeCount (valid: 0-4)"
                 Stop-Transcript
@@ -1301,8 +1742,6 @@ If ($XMLValid -eq $True) {
 
         #Load WinRT Assemblies with validation
         Write-Verbose "Loading Windows Runtime assemblies..."
-        $Script:UseForceFailback = $false
-        $Script:FallbackReason = ""
         $Script:CorporateEnvironment = $null
 
         try {
@@ -1335,21 +1774,19 @@ If ($XMLValid -eq $True) {
                 # Detect corporate environment
                 $CorpEnv = Test-CorporateEnvironment
                 if ($CorpEnv.IsRestricted) {
-                    Write-Warning "Corporate restrictions: $($CorpEnv.Restrictions -join ', ')"
-                    Write-Warning "Recommended fallback: $($CorpEnv.RecommendedFallback)"
+                    Write-Warning "Corporate restrictions detected: $($CorpEnv.Restrictions -join ', ')"
                     $Script:CorporateEnvironment = $CorpEnv
                 }
             }
         }
         catch {
             Write-Error "Critical: WinRT assemblies unavailable: $($_.Exception.Message)"
-            $Script:UseForceFailback = $true
-            $Script:FallbackReason = "WinRT: $($_.Exception.Message)"
-            Write-Warning "Will use fallback notification methods only"
+            Write-Error "Toast notifications will not work without WinRT assemblies"
+            throw
         }
 
-        #Get stage configuration if progressive mode enabled
-        If ($EnableProgressive) {
+        #Get stage configuration if snooze mode enabled
+        If ($Snooze) {
             $StageConfig = Get-StageDetails -SnoozeCount $SnoozeCount
             Write-Output "Toast Stage: $($StageConfig.Stage) ($($StageConfig.VisualUrgency))"
             Write-Output "Scenario: $($StageConfig.Scenario)"
@@ -1398,12 +1835,25 @@ If ($XMLValid -eq $True) {
             }
         }
 
-        #Build toast scenario attribute (omit for default behavior)
-        If ($ToastScenario -eq 'default') {
+        #Build toast scenario attribute (control dismiss button visibility)
+        # Dismiss button behavior:
+        # - scenario="reminder", "alarm", "urgent" → Hides dismiss (X) button (forces user to choose action)
+        # - No scenario attribute or scenario="default" → Shows dismiss (X) button (user can close)
+        If ($Dismiss) {
+            # User explicitly wants dismiss button visible
             $ScenarioAttribute = ''
+            Write-Verbose "Dismiss button enabled (no scenario attribute)"
+        }
+        elseif ($ToastScenario -eq 'default') {
+            # Default scenario shows dismiss button, but we want to hide it unless -Dismiss specified
+            # Change to 'reminder' to hide dismiss while maintaining standard notification behavior
+            $ScenarioAttribute = "scenario=`"reminder`""
+            Write-Verbose "Dismiss button hidden (scenario=reminder)"
         }
         else {
+            # Use specified scenario (alarm, urgent, reminder all hide dismiss button)
             $ScenarioAttribute = "scenario=`"$ToastScenario`""
+            Write-Verbose "Using scenario=$ToastScenario (dismiss button hidden)"
         }
 
         # XML-encode all text variables for safe embedding
@@ -1416,7 +1866,7 @@ If ($XMLValid -eq $True) {
         # Determine audio based on stage (if progressive) or default
         $AudioSrc = "ms-winsoundevent:notification.default"
         $AudioLoop = ""
-        If ($EnableProgressive -and $StageConfig.AudioLoop) {
+        If ($Snooze -and $StageConfig.AudioLoop) {
             $AudioSrc = "ms-winsoundevent:notification.looping.alarm"
             $AudioLoop = 'loop="true"'
             Write-Output "Using looping alarm audio for Stage $($StageConfig.Stage)"
@@ -1448,10 +1898,10 @@ If ($XMLValid -eq $True) {
 </toast>
 "@
 
-        #Build action buttons based on mode (Classic vs Progressive)
-        If ($EnableProgressive) {
-            # Progressive mode: Build stage-specific actions
-            Write-Output "Building progressive mode actions for Stage $SnoozeCount"
+        #Build action buttons based on mode (Snooze vs Simple)
+        If ($Snooze) {
+            # Snooze mode: Build stage-specific actions
+            Write-Output "Building snooze stage actions for Stage $SnoozeCount"
 
             # XML-encode button titles
             $ButtonTitle_Safe = ConvertTo-XmlSafeString $ButtonTitle
@@ -1462,8 +1912,10 @@ If ($XMLValid -eq $True) {
             # Build actions dynamically based on stage
             $ActionsXML = "<toast><actions>"
 
-            # Add snooze button for Stages 0-3
-            if ($StageConfig.Stage -lt 4) {
+            # Add snooze button for Stages 0-2 only (Stage 3 is final warning with no snooze)
+            # Stage 3: User must decide - Reboot Now or Dismiss (transitions to Stage 4)
+            # Stage 4: No snooze, forced reboot decision
+            if ($Snooze -and $StageConfig.Stage -lt 3 -and -not [string]::IsNullOrEmpty($StageConfig.SnoozeInterval)) {
                 $SnoozeInterval = $StageConfig.SnoozeInterval
                 $SnoozeLabel = ""
                 switch ($SnoozeInterval) {
@@ -1478,6 +1930,9 @@ If ($XMLValid -eq $True) {
                 Write-Output "Adding snooze button: $SnoozeLabel (Protocol: $SnoozeProtocolUri)"
                 $ActionsXML += "<action arguments=`"$SnoozeProtocolUri`" content=`"$SnoozeLabel`" activationType=`"protocol`" />"
             }
+            elseif ($StageConfig.Stage -eq 3) {
+                Write-Output "Stage 3: Final warning - No snooze button (user must reboot or dismiss)"
+            }
 
             # Stage 4: Add "Reboot Now" button instead of generic action button
             if ($StageConfig.Stage -eq 4) {
@@ -1491,10 +1946,19 @@ If ($XMLValid -eq $True) {
                 $ActionsXML += "<action arguments=`"$ButtonAction_Safe`" content=`"$ButtonTitle_Safe`" activationType=`"protocol`" />"
             }
 
-            # Add dismiss button for Stages 0-3 only (Stage 4 not dismissable)
+            # Add Reboot Now button for Stages 0-3 (Stage 4 uses Reboot Now as the only button)
             if ($StageConfig.AllowDismiss) {
-                Write-Output "Adding dismiss button"
-                $ActionsXML += "<action arguments=`"dismiss`" content=`"Dismiss`" activationType=`"system`"/>"
+                $RebootProtocolUri = "toast-reboot://$ToastGUID/immediate"
+                Write-Output "Adding reboot now button for Stage $($StageConfig.Stage)"
+                $ActionsXML += "<action arguments=`"$RebootProtocolUri`" content=`"$RebootTitle_Safe`" activationType=`"protocol`"/>"
+            }
+
+            # Add Dismiss button for Stages 0-3 (calls toast-dismiss:// protocol to clean up tasks/registry)
+            # Stage 4: No dismiss - user must make reboot decision
+            if ($StageConfig.AllowDismiss) {
+                $DismissProtocolUri = "toast-dismiss://$ToastGUID/dismiss"
+                Write-Output "Adding dismiss button for Stage $($StageConfig.Stage) (Protocol: $DismissProtocolUri)"
+                $ActionsXML += "<action arguments=`"$DismissProtocolUri`" content=`"Dismiss`" activationType=`"protocol`" />"
             }
 
             $ActionsXML += "</actions></toast>"
@@ -1503,32 +1967,10 @@ If ($XMLValid -eq $True) {
             $Action_Node = $ActionTemplate.toast.actions
         }
         Else {
-            # Classic mode: Use original snooze dropdown or simple actions
-
-            # XML-encode button values
+            # Simple notification: Learn More + Dismiss only
             $ButtonTitle_Safe = ConvertTo-XmlSafeString $ButtonTitle
             $ButtonAction_Safe = ConvertTo-XmlSafeString $ButtonAction
-            $SnoozeTitle_Safe = ConvertTo-XmlSafeString $SnoozeTitle
 
-            #Build XML ActionTemplateSnooze (Used when $Snooze is passed as a parameter)
-            [xml]$ActionTemplateSnooze = @"
-<toast>
-    <actions>
-        <input id="SnoozeTimer" type="selection" title="Select a Snooze Interval" defaultInput="1">
-            <selection id="1" content="1 Minute"/>
-            <selection id="30" content="30 Minutes"/>
-            <selection id="60" content="1 Hour"/>
-            <selection id="120" content="2 Hours"/>
-            <selection id="240" content="4 Hours"/>
-        </input>
-        <action activationType="system" arguments="snooze" hint-inputId="SnoozeTimer" content="$SnoozeTitle_Safe" id="test-snooze"/>
-        <action arguments="$ButtonAction_Safe" content="$ButtonTitle_Safe" activationType="protocol" />
-        <action arguments="dismiss" content="Dismiss" activationType="system"/>
-    </actions>
-</toast>
-"@
-
-            #Build XML ActionTemplate (Used when $Snooze is not passed as a parameter)
             [xml]$ActionTemplate = @"
 <toast>
     <actions>
@@ -1537,16 +1979,7 @@ If ($XMLValid -eq $True) {
     </actions>
 </toast>
 "@
-
-            #If the Snooze parameter was passed, add additional XML elements to Toast
-            If ($Snooze) {
-                #Define default and snooze actions to be added $ToastTemplate
-                $Action_Node = $ActionTemplateSnooze.toast.actions
-            }
-            else {
-                #Define default actions to be added $ToastTemplate
-                $Action_Node = $ActionTemplate.toast.actions
-            }
+            $Action_Node = $ActionTemplate.toast.actions
         }
 
         #Append actions to $ToastTemplate
@@ -1601,7 +2034,7 @@ If ($XMLValid -eq $True) {
                         Write-Warning "[CORPORATE RESTRICTION DETECTED]"
                         Write-Warning "GPO policy prevents AppId registration"
                         Write-Warning "Toast notifications may fail to display"
-                        Write-Warning "Fallback notification will be used if needed"
+                        Write-Warning "Script will fail cleanly if toast cannot be shown"
                         Write-Warning "========================================="
 
                         # Pre-emptive corporate environment detection
@@ -1673,64 +2106,40 @@ If ($XMLValid -eq $True) {
             }
         }
         catch {
-            # Toast display failed - use fallback
+            # Toast display failed
             $ToastDisplaySucceeded = $false
             $ErrorDetails = $_.Exception.Message
 
-            Write-Warning "========================================="
-            Write-Warning "[TOAST DISPLAY FAILED]"
-            Write-Warning "Error: $ErrorDetails"
-            Write-Warning "========================================="
-
-            # Prepare fallback notification
-            $FallbackTitle = if ($Priority) { "[URGENT] $EventTitle" } else { $EventTitle }
-            $FallbackMessage = @"
-$EventText
-
-Action Required: $ButtonTitle
-
-This notification could not be displayed as a toast due to corporate environment restrictions.
-
-Technical Details: $ErrorDetails
-"@
-
-            $FallbackSeverity = if ($Priority -or $ToastScenario -eq 'alarm') { 'Warning' } else { 'Information' }
-
-            # Attempt fallback
-            Write-Output "Attempting fallback notification method..."
-            $FallbackResult = Show-FallbackNotification -Title $FallbackTitle -Message $FallbackMessage -Method Auto -Severity $FallbackSeverity
-
-            if ($FallbackResult) {
-                Write-Output "[OK] Fallback notification displayed successfully"
-
-                # Log fallback usage for IT monitoring
-                try {
-                    $FallbackLogPath = "HKLM:\SOFTWARE\ToastNotification\FallbackUsage"
-                    if (-not (Test-Path $FallbackLogPath)) {
-                        New-Item -Path $FallbackLogPath -Force | Out-Null
-                    }
-
-                    $FallbackCount = (Get-ItemProperty -Path $FallbackLogPath -Name "Count" -ErrorAction SilentlyContinue).Count
-                    if ($null -eq $FallbackCount) { $FallbackCount = 0 }
-                    $FallbackCount++
-
-                    Set-ItemProperty -Path $FallbackLogPath -Name "Count" -Value $FallbackCount -Type DWord -Force
-                    Set-ItemProperty -Path $FallbackLogPath -Name "LastFallback" -Value (Get-Date).ToString('s') -Type String -Force
-                    Set-ItemProperty -Path $FallbackLogPath -Name "LastError" -Value $ErrorDetails -Type String -Force
-                }
-                catch {
-                    Write-Verbose "Could not log fallback usage: $($_.Exception.Message)"
-                }
+            Write-Error "========================================="
+            Write-Error "[TOAST DISPLAY FAILED]"
+            Write-Error "Error: $ErrorDetails"
+            Write-Error "Error Type: $($_.Exception.GetType().FullName)"
+            if ($_.Exception.HResult) {
+                Write-Error "Error Code (HRESULT): 0x$($_.Exception.HResult.ToString('X8'))"
             }
-            else {
-                Write-Error "Fallback notification also failed - user was not notified"
+            Write-Error "========================================="
+            Write-Error "Check log file for detailed diagnostics"
+
+            # Log the failure for diagnostics
+            try {
+                $FailureLogPath = "HKLM:\SOFTWARE\ToastNotification\Failures"
+                if (-not (Test-Path $FailureLogPath)) {
+                    New-Item -Path $FailureLogPath -Force | Out-Null
+                }
+
+                Set-ItemProperty -Path $FailureLogPath -Name "LastFailure" -Value (Get-Date).ToString('s') -Type String -Force
+                Set-ItemProperty -Path $FailureLogPath -Name "LastError" -Value $ErrorDetails -Type String -Force
+                Set-ItemProperty -Path $FailureLogPath -Name "LastErrorType" -Value $_.Exception.GetType().FullName -Type String -Force
+            }
+            catch {
+                Write-Verbose "Could not log failure: $($_.Exception.Message)"
             }
         }
         finally {
             Write-Verbose "Toast display operation completed: Success=$ToastDisplaySucceeded"
         }
         # Continue with progressive logic (only if toast succeeded)
-        If ($ToastDisplaySucceeded -and $EnableProgressive) {
+        If ($ToastDisplaySucceeded -and $Snooze) {
             Write-Output "Progressive Stage: $SnoozeCount"
 
             # Stage 4: Trigger automatic reboot countdown
