@@ -5,6 +5,12 @@ Created by:   Ben Whitmore
 Filename:     Toast_Notify.ps1
 ===========================================================================
 
+Version 2.24 - 17/02/2026
+-FIX: Added toast-dismiss:// protocol handler for proper dismiss cleanup
+-Dismiss button now unregisters pending snooze tasks and removes registry state
+-Stages 0-3: Shows Dismiss button (protocol-backed cleanup) alongside Reboot Now
+-Stage 4: No Dismiss button (user must make reboot decision)
+
 Version 2.23 - 17/02/2026
 -ARCHITECTURE CHANGE: Removed task pre-creation from SYSTEM deployment (Initialize-SnoozeTasks now a no-op)
 -ROOT CAUSE: All principal types for pre-created tasks fail for standard user modification (GroupId/SeBatchLogonRight, InteractiveToken/UserId schema)
@@ -1549,6 +1555,38 @@ If ($XMLValid -eq $True) {
                 Set-ItemProperty -Path $RebootCommandKey -Name "(Default)" -Value $RebootCommandValue -Force
 
                 Write-Output "toast-reboot:// protocol registered: $RebootCommandValue"
+
+                # Register toast-dismiss:// protocol handler (for Stages 0-3 "Dismiss" button)
+                Write-Output "Registering toast-dismiss:// protocol handler..."
+                $DismissProtocolKey = "Registry::HKEY_CLASSES_ROOT\toast-dismiss"
+
+                # Create protocol key
+                if (!(Test-Path $DismissProtocolKey)) {
+                    New-Item -Path "Registry::HKEY_CLASSES_ROOT" -Name "toast-dismiss" -Force | Out-Null
+                }
+
+                Set-ItemProperty -Path $DismissProtocolKey -Name "(Default)" -Value "URL:Toast Dismiss Protocol" -Force
+                Set-ItemProperty -Path $DismissProtocolKey -Name "URL Protocol" -Value "" -Force
+
+                # Create shell\open\command structure
+                $DismissCommandKey = "$DismissProtocolKey\shell\open\command"
+                if (!(Test-Path "$DismissProtocolKey\shell")) {
+                    New-Item -Path $DismissProtocolKey -Name "shell" -Force | Out-Null
+                }
+                if (!(Test-Path "$DismissProtocolKey\shell\open")) {
+                    New-Item -Path "$DismissProtocolKey\shell" -Name "open" -Force | Out-Null
+                }
+                if (!(Test-Path $DismissCommandKey)) {
+                    New-Item -Path "$DismissProtocolKey\shell\open" -Name "command" -Force | Out-Null
+                }
+
+                # Set command to Toast_Dismiss_Handler.ps1 with log directory
+                $DismissHandlerPath = Join-Path $ToastPath "Toast_Dismiss_Handler.ps1"
+                $DismissCmdParams = "-ProtocolUri `"%1`" -RegistryHive $RegistryHive -RegistryPath `"$RegistryPath`" -LogDirectory `"$($FolderStructure.Logs)`""
+                $DismissCommandValue = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$DismissHandlerPath`" $DismissCmdParams"
+                Set-ItemProperty -Path $DismissCommandKey -Name "(Default)" -Value $DismissCommandValue -Force
+
+                Write-Output "toast-dismiss:// protocol registered: $DismissCommandValue"
             }
             catch {
                 Write-Warning "Failed to update protocol handler command: $($_.Exception.Message)"
@@ -1913,6 +1951,14 @@ If ($XMLValid -eq $True) {
                 $RebootProtocolUri = "toast-reboot://$ToastGUID/immediate"
                 Write-Output "Adding reboot now button for Stage $($StageConfig.Stage)"
                 $ActionsXML += "<action arguments=`"$RebootProtocolUri`" content=`"$RebootTitle_Safe`" activationType=`"protocol`"/>"
+            }
+
+            # Add Dismiss button for Stages 0-3 (calls toast-dismiss:// protocol to clean up tasks/registry)
+            # Stage 4: No dismiss - user must make reboot decision
+            if ($StageConfig.AllowDismiss) {
+                $DismissProtocolUri = "toast-dismiss://$ToastGUID/dismiss"
+                Write-Output "Adding dismiss button for Stage $($StageConfig.Stage) (Protocol: $DismissProtocolUri)"
+                $ActionsXML += "<action arguments=`"$DismissProtocolUri`" content=`"Dismiss`" activationType=`"protocol`" />"
             }
 
             $ActionsXML += "</actions></toast>"
