@@ -5,6 +5,13 @@ Created by:   Ben Whitmore
 Filename:     Toast_Notify.ps1
 ===========================================================================
 
+Version 2.16 - 17/02/2026
+-FIX: Removed -DeleteExpiredTaskAfter from pre-created snooze tasks only (Initialize-SnoozeTasks)
+-Root cause: DeleteExpiredTaskAfter requires a trigger with EndBoundary - tasks with no trigger fail XML validation
+-Pre-created snooze tasks have no trigger at creation (added later by snooze handler) - cannot use DeleteExpiredTaskAfter
+-Main notification task retains -DeleteExpiredTaskAfter (30 days) - it has trigger with EndBoundary set at creation
+-Pre-created snooze tasks are reused infrastructure (disabled/re-enabled), not candidates for auto-delete anyway
+
 Version 2.15 - 17/02/2026
 -Auto-delete expired tasks: Changed -Compatibility V1 to Win8 (snooze + main task)
 -Added -DeleteExpiredTaskAfter (30 days) to both task settings
@@ -490,12 +497,11 @@ function Initialize-SnoozeTasks {
             # Create principal (USERS group - allows all users to modify)
             $Task_Principal = New-ScheduledTaskPrincipal -GroupId "S-1-5-32-545" -RunLevel Limited
 
-            # Create settings (task disabled by default, no trigger, auto-delete 30 days after expiry)
+            # Create settings (task disabled by default, no trigger)
             $Task_Settings = New-ScheduledTaskSettingsSet `
                 -Compatibility Win8 `
                 -AllowStartIfOnBatteries `
                 -DontStopIfGoingOnBatteries `
-                -DeleteExpiredTaskAfter (New-TimeSpan -Days 30) `
                 -Disable
 
             # Create task (no trigger - will be set by snooze handler)
