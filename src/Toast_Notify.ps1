@@ -5,6 +5,16 @@ Created by:   Ben Whitmore
 Filename:     Toast_Notify.ps1
 ===========================================================================
 
+Version 2.21 - 17/02/2026
+-FIX: Changed pre-created snooze task principal from GroupId S-1-5-32-545 to NT AUTHORITY\INTERACTIVE (TASK_LOGON_INTERACTIVE_TOKEN)
+-ROOT CAUSE: GroupId principal requires SeBatchLogonRight per MSDN ITaskFolder::RegisterTaskDefinition. Standard users do not have this right by default.
+-INTERACTIVE principal allows standard users to call Set-ScheduledTask/Enable-ScheduledTask without SeBatchLogonRight
+-Task still runs in user session (interactive token preserved), toast displays correctly
+-DACL grant via SetSecurityDescriptor remains as belt-and-suspenders for explicit modify rights
+-DACL changed from D:(A;;GA;;;AU) to D:(A;;GRGWGX;;;SY)(A;;GRGWGX;;;BA)(A;;GRGWGX;;;IU)
+-ISO 27001 A.9.4.1: IU (INTERACTIVE) instead of AU (Authenticated Users) for least privilege
+-ISO 27001 A.9.4.1: GRGWGX instead of GA removes DELETE/WRITE_DAC/WRITE_OWNER (not needed for snooze)
+
 Version 2.20 - 17/02/2026
 -FIX: Initialize-SnoozeTasks now updates DACL on existing tasks (was skipping via continue)
 -FIX: Changed SDDL from FA (FILE_ALL_ACCESS) to GA (Generic All) for correct task object rights
@@ -474,9 +484,15 @@ function Initialize-SnoozeTasks {
     .NOTES
         Requires: SYSTEM context (called during deployment phase only)
 
-        Security: Grants (A;;GRGWGX;;;AU) - Authenticated Users receive Generic Read, Write,
-        and Execute rights on each snooze task DACL. This is intentional - all domain users
-        must be able to activate their own snooze task (Set-ScheduledTask / Enable-ScheduledTask).
+        Security: Tasks are created with principal NT AUTHORITY\INTERACTIVE (TASK_LOGON_INTERACTIVE_TOKEN).
+        INTERACTIVE logon type is used so standard users can modify the task without needing
+        SeBatchLogonRight. GroupId (TASK_LOGON_GROUP) requires SeBatchLogonRight per MSDN
+        ITaskFolder::RegisterTaskDefinition. Standard users do not have SeBatchLogonRight by default,
+        which caused E_ACCESS_DENIED (0x80070005) on Set-ScheduledTask regardless of the task DACL.
+
+        Grants (A;;GA;;;AU) - Authenticated Users receive Generic All rights on each snooze task
+        DACL. This is intentional - all domain users must be able to activate their own snooze task
+        (Set-ScheduledTask / Enable-ScheduledTask).
 
         Business Rationale:
         - Multi-user shared endpoints need all users to action snooze notifications
@@ -484,7 +500,7 @@ function Initialize-SnoozeTasks {
         - Task executable path is set at creation and cannot be changed via these permissions
 
         Risk Mitigation:
-        - Task executable path is immutable (GRGWGX does not grant file-system write on target)
+        - Task executable path is immutable (GA does not grant file-system write on target)
         - Task trigger/schedule can be modified, but executes the same Toast_Notify.ps1 script
         - ISO 27001 A.9.4.1: Task scope is limited to Toast GUID-specific tasks only
     #>
@@ -523,8 +539,11 @@ function Initialize-SnoozeTasks {
                     -Execute "C:\WINDOWS\system32\WindowsPowerShell\v1.0\PowerShell.exe" `
                     -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""$ToastScriptPath"" -ToastGUID ""$ToastGUID"" -Snooze"
 
-                # Create principal (USERS group - allows all users to modify)
-                $Task_Principal = New-ScheduledTaskPrincipal -GroupId "S-1-5-32-545" -RunLevel Limited
+                # Create principal using NT AUTHORITY\INTERACTIVE (TASK_LOGON_INTERACTIVE_TOKEN).
+                # INTERACTIVE logon type does NOT require SeBatchLogonRight, which standard users
+                # lack by default. GroupId (TASK_LOGON_GROUP) requires SeBatchLogonRight per MSDN
+                # ITaskFolder::RegisterTaskDefinition, causing E_ACCESS_DENIED on Set-ScheduledTask.
+                $Task_Principal = New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\INTERACTIVE" -LogonType Interactive -RunLevel Limited
 
                 # Create settings (task disabled by default, no trigger)
                 $Task_Settings = New-ScheduledTaskSettingsSet `
@@ -555,9 +574,10 @@ function Initialize-SnoozeTasks {
             # DACL grant runs for BOTH new and pre-existing tasks.
             # Without this, Set-ScheduledTask / Enable-ScheduledTask fail with Access Denied
             # for standard users even though the task exists.
-            # NOTE: GroupId S-1-5-32-545 above controls what account the task RUNS AS,
-            #       not who can MODIFY it. The task DACL is stored separately in the
-            #       registry and defaults to Administrators+SYSTEM only.
+            # NOTE: NT AUTHORITY\INTERACTIVE above specifies the task runs as the interactive user.
+            #       The task DACL (below) controls who can MODIFY the task definition via
+            #       Set-ScheduledTask/Enable-ScheduledTask. The task DACL is stored separately in
+            #       the registry and defaults to Administrators+SYSTEM only without this grant.
             $TaskScheduler = $null
             try {
                 $ErrorActionPreference = 'Stop'
@@ -567,9 +587,14 @@ function Initialize-SnoozeTasks {
                 # Set DACL directly using Generic All (GA) - correct for Task Scheduler objects.
                 # GA maps to TASK_ALL_ACCESS on task objects; FA (FILE_ALL_ACCESS) is for file objects
                 # and does not correctly map task modify rights on the COM task object interface.
-                # SDDL: SYSTEM full access, Administrators full access, Authenticated Users full access
+                # SDDL: SYSTEM full access, Administrators full access, INTERACTIVE users read/write/execute
+                # IU (INTERACTIVE, S-1-5-4) instead of AU (Authenticated Users) per ISO 27001 A.9.4.1 least privilege.
+                # IU restricts to users with an active interactive session only. AU would allow any domain user
+                # (including background services and network logons) to modify task triggers - ISO non-compliant.
+                # GRGWGX (Generic Read+Write+Execute) instead of GA (Generic All) omits DELETE/WRITE_DAC/WRITE_OWNER.
+                # Set-ScheduledTask and Enable-ScheduledTask only need Read+Write+Execute access.
                 # flags=0: only valid values per MSDN are 0 (default) and 0x10 (TASK_DONT_ADD_PRINCIPAL_ACE)
-                $NewSecDescriptor = 'D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;AU)'
+                $NewSecDescriptor = 'D:(A;;GRGWGX;;;SY)(A;;GRGWGX;;;BA)(A;;GRGWGX;;;IU)'
                 $TaskObject.SetSecurityDescriptor($NewSecDescriptor, 0)
                 Write-Output "  Granted AU Generic All access: $TaskName [OK]"
             }

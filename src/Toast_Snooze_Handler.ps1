@@ -5,6 +5,11 @@ Created by:   Ben Whitmore (with AI assistance)
 Filename:     Toast_Snooze_Handler.ps1
 ===========================================================================
 
+Version 1.8 - 17/02/2026
+-FIX: Restructured task activation block - separate Get-ScheduledTask catch (task not found) from Set-ScheduledTask/Enable-ScheduledTask catch (activation failure)
+-Resolves misleading 'PRE-CREATED TASK NOT FOUND' message when actual error was Set-ScheduledTask access denied
+-CimException catch now ONLY fires when Get-ScheduledTask returns task-not-found, not when Set-ScheduledTask fails
+
 Version 1.7 - 17/02/2026
 -FIX: Added $ErrorActionPreference='Continue' at start of all catch blocks
 -Prevents Write-Error in catch blocks from becoming terminating errors under $EAP='Stop'
@@ -460,9 +465,51 @@ try {
         Write-Output "[INFO] First snooze (count=1) - no previous task to disable"
     }
 
+    # Step 1: Look up the pre-created task. Separate try/catch so CimException fires ONLY for
+    # "task not found", not for Set-ScheduledTask/Enable-ScheduledTask failures below.
+    $ExistingTask = $null
     try {
-        # Get the pre-created task (should exist from SYSTEM deployment)
         $ExistingTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+    }
+    catch [Microsoft.Management.Infrastructure.CimException] {
+        $ErrorActionPreference = 'Continue'
+        # Task doesn't exist - means Toast_Notify.ps1 wasn't deployed with -Snooze as SYSTEM
+        Write-Error "========================================"
+        Write-Error "PRE-CREATED TASK NOT FOUND"
+        Write-Error "========================================"
+        Write-Error ""
+        Write-Error "Task '$TaskName' does not exist."
+        Write-Error "This means Toast_Notify.ps1 was not deployed correctly."
+        Write-Error ""
+        Write-Error "ROOT CAUSE:"
+        Write-Error "Standard users CANNOT create scheduled tasks (Windows security by design)."
+        Write-Error "Toast_Notify.ps1 must be deployed as SYSTEM with -Snooze to pre-create"
+        Write-Error "the required disabled tasks. Standard users can then modify these existing tasks."
+        Write-Error ""
+        Write-Error "SOLUTION:"
+        Write-Error "1. Re-deploy Toast_Notify.ps1 as SYSTEM with -Snooze parameter"
+        Write-Error "   This will pre-create 4 disabled scheduled tasks (Snooze1-4)"
+        Write-Error ""
+        Write-Error "Deployment command (run as SYSTEM via SCCM/Intune):"
+        Write-Error "   powershell.exe -ExecutionPolicy Bypass -File Toast_Notify.ps1 \"
+        Write-Error "       -ToastGUID ""$ToastGUID"" -Snooze"
+        Write-Error ""
+        Write-Error "After deployment, verify tasks exist in Task Scheduler:"
+        Write-Error "   Toast_Notification_{GUID}_Snooze1 [DISABLED]"
+        Write-Error "   Toast_Notification_{GUID}_Snooze2 [DISABLED]"
+        Write-Error "   Toast_Notification_{GUID}_Snooze3 [DISABLED]"
+        Write-Error "   Toast_Notification_{GUID}_Snooze4 [DISABLED]"
+        Write-Error ""
+        Write-Error "Current User: $env:USERNAME (USER context - cannot create tasks)"
+        Write-Error "========================================"
+        Stop-Transcript
+        exit 1
+    }
+
+    # Step 2: Activate the task (task IS found at this point).
+    # Separate try block from Step 1 so CimException in Step 1 fires ONLY for task-not-found.
+    # UnauthorizedAccessException and generic catch here handle Set-ScheduledTask / Enable-ScheduledTask failures.
+    try {
         Write-Output "========================================="
         Write-Output "TASK ACTIVATION - DETAILED DIAGNOSTICS"
         Write-Output "========================================="
@@ -536,40 +583,6 @@ try {
             Write-Warning "[WARNING] Task state is: $($VerifyTask.State) (expected: Ready)"
         }
         Write-Output "========================================="
-    }
-    catch [Microsoft.Management.Infrastructure.CimException] {
-        $ErrorActionPreference = 'Continue'
-        # Task doesn't exist - means Toast_Notify.ps1 wasn't deployed with -Snooze as SYSTEM
-        Write-Error "========================================"
-        Write-Error "PRE-CREATED TASK NOT FOUND"
-        Write-Error "========================================"
-        Write-Error ""
-        Write-Error "Task '$TaskName' does not exist."
-        Write-Error "This means Toast_Notify.ps1 was not deployed correctly."
-        Write-Error ""
-        Write-Error "ROOT CAUSE:"
-        Write-Error "Standard users CANNOT create scheduled tasks (Windows security by design)."
-        Write-Error "Toast_Notify.ps1 must be deployed as SYSTEM with -Snooze to pre-create"
-        Write-Error "the required disabled tasks. Standard users can then modify these existing tasks."
-        Write-Error ""
-        Write-Error "SOLUTION:"
-        Write-Error "1. Re-deploy Toast_Notify.ps1 as SYSTEM with -Snooze parameter"
-        Write-Error "   This will pre-create 4 disabled scheduled tasks (Snooze1-4)"
-        Write-Error ""
-        Write-Error "Deployment command (run as SYSTEM via SCCM/Intune):"
-        Write-Error "   powershell.exe -ExecutionPolicy Bypass -File Toast_Notify.ps1 \"
-        Write-Error "       -ToastGUID ""$ToastGUID"" -Snooze"
-        Write-Error ""
-        Write-Error "After deployment, verify tasks exist in Task Scheduler:"
-        Write-Error "   Toast_Notification_{GUID}_Snooze1 [DISABLED]"
-        Write-Error "   Toast_Notification_{GUID}_Snooze2 [DISABLED]"
-        Write-Error "   Toast_Notification_{GUID}_Snooze3 [DISABLED]"
-        Write-Error "   Toast_Notification_{GUID}_Snooze4 [DISABLED]"
-        Write-Error ""
-        Write-Error "Current User: $env:USERNAME (USER context - cannot create tasks)"
-        Write-Error "========================================"
-        Stop-Transcript
-        exit 1
     }
     catch [System.UnauthorizedAccessException] {
         $ErrorActionPreference = 'Continue'
