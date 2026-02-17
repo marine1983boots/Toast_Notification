@@ -1354,7 +1354,8 @@ If ($XMLValid -eq $True) {
     $ToastTitle = [string]$XMLToast.ToastContent.ToastTitle
     $Signature = [string]$XMLToast.ToastContent.Signature
     $EventTitle = [string]$XMLToast.ToastContent.EventTitle
-    $EventText = [string]$XMLToast.ToastContent.EventText
+    $EventText = Get-StageEventText -XmlDocument $XMLToast -StageNumber 0
+    if ([string]::IsNullOrWhiteSpace($EventText)) { $EventText = '' }
     $ButtonTitle = [string]$XMLToast.ToastContent.ButtonTitle
     $ButtonAction = [string]$XMLToast.ToastContent.ButtonAction
     $SnoozeTitle = [string]$XMLToast.ToastContent.SnoozeTitle
@@ -1423,6 +1424,7 @@ If ($XMLValid -eq $True) {
     # Replace {MANUFACTURER} token in toast header variables
     $EventTitle = $EventTitle -replace '\{MANUFACTURER\}', $DetectedManufacturer
     $ToastTitle = $ToastTitle -replace '\{MANUFACTURER\}', $DetectedManufacturer
+    $EventText  = $EventText  -replace '\{MANUFACTURER\}', $DetectedManufacturer
 
     # App display name: set by -AppIDName parameter (default: "System IT")
     $AppIDDisplayName = $AppIDName
