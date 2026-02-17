@@ -1071,6 +1071,13 @@ function Register-ToastAppId {
             try {
                 $Existing = Get-ItemProperty -Path $RegPath -ErrorAction Stop
                 Write-Verbose "AppUserModelId already registered: $AppId"
+
+                # Update DisplayName if it differs from the desired value
+                if ($Existing.DisplayName -ne $AppIDDisplayName) {
+                    Write-Verbose "Updating DisplayName: '$($Existing.DisplayName)' -> '$AppIDDisplayName'"
+                    Set-ItemProperty -Path $RegPath -Name "DisplayName" -Value $AppIDDisplayName -Type String -ErrorAction Stop
+                }
+
                 $Result.Success = $true
                 return $Result
             }
