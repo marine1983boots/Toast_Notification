@@ -5,7 +5,7 @@
 | Field | Value |
 |-------|-------|
 | Document Title | Technical Documentation - Progressive Toast Notification System v3.0 |
-| Version | 3.3 |
+| Version | 3.5 |
 | Date | 2026-02-17 |
 | Author | CR |
 | Based On | Toast by Ben Whitmore (@byteben) |
@@ -30,6 +30,8 @@
 | 3.1 | 2026-02-16 | CR | Added configurable registry/log locations (v2.3), permission management, HKCU mode |
 | 3.2 | 2026-02-17 | CR | Added Section 12: Scheduled Task DACL Permission Architecture covering v2.14 AU SDDL grant; updated security controls, definitions, and quality records for v2.14 |
 | 3.3 | 2026-02-17 | CR | Updated for v2.15: Win8 task schema, DeleteExpiredTaskAfter 30-day auto-cleanup; added Section 12.6 change log and code review record CR-TOAST-v2.15-001 |
+| 3.4 | 2026-02-17 | CR | Updated for v2.16: Removed DeleteExpiredTaskAfter from Initialize-SnoozeTasks (no-trigger tasks incompatible with this setting); updated Section 12.2.4; added Section 12.7 change log and code review record CR-TOAST-v2.16-001 |
+| 3.5 | 2026-02-17 | CR | Updated for v2.17: DACL Security Information flags corrected (GetSecurityDescriptor/SetSecurityDescriptor flags 0xF/0 replaced with 4/4; ACE changed from GRGWGX to GA for correct Task Scheduler modify rights); added Section 12.2.5 and Section 12.8 change log; added code review record CR-TOAST-v2.17-001 |
 
 ## Table of Contents
 
@@ -2554,10 +2556,10 @@ The chosen approach using the `Schedule.Service` COM object is the only reliable
 
 #### 12.2.2 SDDL Permission Grant
 
-The following ACE is appended to each pre-created snooze task security descriptor:
+The following ACE is appended to each pre-created snooze task security descriptor (v2.17 corrected implementation):
 
 ```
-(A;;GRGWGX;;;AU)
+(A;;GA;;;AU)
 ```
 
 **SDDL Component Breakdown:**
@@ -2566,42 +2568,42 @@ The following ACE is appended to each pre-created snooze task security descripto
 |-----------|-------|---------|
 | Type | `A` | Allow (not Deny) |
 | Flags | (empty) | No inheritance flags - applies to this object only |
-| Rights | `GR` | Generic Read - allows reading task properties and status |
-| Rights | `GW` | Generic Write - allows modifying task properties (trigger, settings) |
-| Rights | `GX` | Generic Execute - allows running/enabling the task |
+| Rights | `GA` | Generic All - maps to TASK_ALL_ACCESS in the Task Scheduler object type |
 | SID | `AU` | Authenticated Users (S-1-5-11) - all users who have authenticated |
 
-**What GRGWGX Allows on a Task Object:**
+**Note on ACE History:** Prior to v2.17, the ACE was `(A;;GRGWGX;;;AU)` (Generic Read + Generic Write + Generic Execute). That combination did not map to the Task Scheduler modify right and was also silently non-functional due to incorrect SecurityInformation flags (see Section 12.2.5). The ACE was corrected to `(A;;GA;;;AU)` in v2.17.
+
+**What GA (TASK_ALL_ACCESS) Allows on a Task Object:**
 
 - Reading task definition and current status (`Get-ScheduledTask`)
 - Modifying task settings and trigger (`Set-ScheduledTask`)
 - Enabling or disabling the task (`Enable-ScheduledTask`, `Disable-ScheduledTask`)
 - Running the task manually (`Start-ScheduledTask`)
 
-**What GRGWGX Does NOT Allow:**
+**What GA Does NOT Allow:**
 
-- Modifying the task's action (executable path or arguments) - this requires WRITE_DAC
-- Changing the task's security descriptor - this requires WRITE_DAC or WRITE_OWNER
-- Deleting the task - this requires DELETE right (not included in GRGWGX on task objects)
+- Modifying the task's action (executable path or arguments) - this requires WRITE_DAC on the task object, which is not conferred by TASK_ALL_ACCESS for non-owners
+- Changing the task's security descriptor - requires WRITE_DAC or WRITE_OWNER
 - Writing to the filesystem path that the task executes - DACL on the task object has no bearing on filesystem permissions of the target script
 
-**Security Implication:** A standard user who has received these rights can change the task trigger timing and task settings, but cannot redirect the task to execute a different executable or script. The action (executable + arguments) is set at creation and is protected against modification without elevated rights.
+**Security Implication:** A standard user who has received these rights can change the task trigger timing and task settings, but cannot redirect the task to execute a different executable or script. The action (executable + arguments) is set at creation time by SYSTEM and is protected against modification without elevated rights. See Section 12.3 for the ISO 27001 A.9.4.1 assessment.
 
 #### 12.2.3 Implementation Code Reference
 
-The permission grant is implemented in `Initialize-SnoozeTasks` (src/Toast_Notify.ps1, v2.14):
+The permission grant is implemented in `Initialize-SnoozeTasks` (src/Toast_Notify.ps1, v2.17). The code below reflects the corrected implementation; see Section 12.2.5 for documentation of the prior defects corrected in v2.17.
 
 ```powershell
 $TaskScheduler = New-Object -ComObject 'Schedule.Service'
 $TaskScheduler.Connect()
 $TaskObject = $TaskScheduler.GetFolder('\').GetTask($TaskName)
 
-# 0xF = DACL_SECURITY_INFORMATION flag
-$SecDescriptor = $TaskObject.GetSecurityDescriptor(0xF)
+# 4 = DACL_SECURITY_INFORMATION only; avoids retrieving SACL which would misplace the ACE
+$SecDescriptor = $TaskObject.GetSecurityDescriptor(4)
 
-if ($SecDescriptor -notmatch 'A;;GRGWGX;;;AU') {
-    $SecDescriptor += '(A;;GRGWGX;;;AU)'
-    $TaskObject.SetSecurityDescriptor($SecDescriptor, 0)
+if ($SecDescriptor -notmatch '\(A;;GA;;;AU\)') {
+    $SecDescriptor += '(A;;GA;;;AU)'
+    # 4 = DACL_SECURITY_INFORMATION; writes DACL only, preserving OWNER/GROUP/SACL
+    $TaskObject.SetSecurityDescriptor($SecDescriptor, 4)
 }
 ```
 
@@ -2609,8 +2611,10 @@ if ($SecDescriptor -notmatch 'A;;GRGWGX;;;AU') {
 
 | Detail | Value | Rationale |
 |--------|-------|-----------|
-| `GetSecurityDescriptor(0xF)` | `SecurityInformation = 0xF` | Retrieves Owner, Group, DACL, and SACL flags together to preserve the full descriptor |
-| Idempotency check | `if ($SecDescriptor -notmatch 'A;;GRGWGX;;;AU')` | Prevents duplicate ACE insertion if function is called a second time (e.g. task already exists) |
+| `GetSecurityDescriptor(4)` | `SecurityInformation = DACL_SECURITY_INFORMATION` | Retrieves DACL section only; prevents appended ACE from landing in the SACL when SACL is present |
+| `SetSecurityDescriptor(sddl, 4)` | `SecurityInformation = DACL_SECURITY_INFORMATION` | Writes DACL section to task registry entry; OWNER, GROUP, and SACL are preserved untouched |
+| ACE `(A;;GA;;;AU)` | Generic All for Authenticated Users | `GA` maps to `TASK_ALL_ACCESS` in Task Scheduler object type; includes modify right required by `Set-ScheduledTask` |
+| Idempotency check | `if ($SecDescriptor -notmatch '\(A;;GA;;;AU\)')` | Prevents duplicate ACE insertion if function is called a second time (e.g. task already exists) |
 | COM cleanup | `[Marshal]::ReleaseComObject($TaskScheduler)` in `finally` block | Releases the COM reference regardless of success or failure to prevent handle leaks |
 | Error isolation | Separate `try-catch-finally` wrapping only the COM/ACL section | ACL failure is non-fatal; task still functions as a base task even without the permission grant |
 | SYSTEM context guard | `$CurrentIdentity -ne "NT AUTHORITY\SYSTEM"` check at function entry | Function returns immediately if not running as SYSTEM, preventing permission errors during user-context replay |
@@ -2656,6 +2660,94 @@ src/Toast_Notify.ps1
 | Snooze tasks (Snooze1-4) | No - created disabled with no trigger | No EndBoundary to expire; tasks remain as harmless disabled entries. Removed by `Remove-StaleToastFolders` or GUID reuse |
 
 **Note on snooze task persistence:** Snooze tasks are pre-created in a disabled state with no trigger or EndBoundary. `DeleteExpiredTaskAfter` measures from the expiry of the last trigger EndBoundary. Because disabled tasks with no trigger have no such boundary, they are unaffected by this setting and persist until explicitly cleaned up. This is expected and harmless behaviour.
+
+**Correction Applied in v2.16**
+
+Post-deployment testing on corporate endpoints revealed that `DeleteExpiredTaskAfter` is incompatible with triggerless tasks under strict GPO task XML validation, regardless of the `-Compatibility` level. Even with `-Compatibility Win8`, the XML error `0x8004131F` was raised when registering `Initialize-SnoozeTasks` tasks that carry `DeleteExpiredTaskAfter` but have no trigger.
+
+The `DeleteExpiredTaskAfter` element was removed from `Initialize-SnoozeTasks` task settings in v2.16. The main toast task retains `DeleteExpiredTaskAfter` because it always has an EndBoundary trigger. The lifecycle behaviour table is updated accordingly:
+
+| Task Type | Has Trigger / EndBoundary? | DeleteExpiredTaskAfter (v2.16+) |
+|-----------|---------------------------|---------------------------------|
+| Main toast task | Yes - EndBoundary 2 minutes after trigger fires | Retained: auto-deletes 30 days after EndBoundary passes |
+| Snooze tasks (Snooze1-4) | No - created disabled, no trigger | Removed: no trigger means no expiry boundary; setting caused XML error on GPO-strict endpoints |
+
+**Definitive Lesson:** `DeleteExpiredTaskAfter` must only be applied to tasks that will always have a trigger with an EndBoundary. Applying it to triggerless pre-created tasks is invalid under corporate GPO task XML schema validation regardless of `-Compatibility` value. Do NOT add `DeleteExpiredTaskAfter` to `Initialize-SnoozeTasks` in future revisions.
+
+#### 12.2.5 DACL Grant Security Information Flags (v2.17)
+
+**Introduced In:** Toast_Notify.ps1 v2.17
+
+**Root Cause of Prior Defect**
+
+The `Initialize-SnoozeTasks` DACL grant introduced in v2.14 contained three interrelated bugs that silently prevented the AU ACE from ever being written to the task DACL, resulting in `Access Denied` errors when `Toast_Snooze_Handler.ps1` subsequently called `Set-ScheduledTask` in user context.
+
+**Bug 1: Incorrect GetSecurityDescriptor Flags**
+
+```
+Prior code:  $SecDescriptor = $TaskObject.GetSecurityDescriptor(0xF)
+```
+
+The `IRegisteredTask.GetSecurityDescriptor(SecurityInformation)` method accepts a bitmask from the `SECURITY_INFORMATION` enumeration:
+
+| Flag Name | Hex Value | Includes |
+|-----------|-----------|---------|
+| `OWNER_SECURITY_INFORMATION` | 0x1 | Owner SID |
+| `GROUP_SECURITY_INFORMATION` | 0x2 | Primary group SID |
+| `DACL_SECURITY_INFORMATION` | 0x4 | Discretionary ACL |
+| `SACL_SECURITY_INFORMATION` | 0x8 | System ACL (audit entries) |
+
+Passing `0xF` (= 0x1 OR 0x2 OR 0x4 OR 0x8) retrieves the full security descriptor including the SACL section. On systems where the task has an audit SACL, the returned SDDL string contains an `S:` (SACL) component after the `D:` (DACL) component. When the code appended `(A;;GRGWGX;;;AU)` to the end of this string, the ACE was placed inside the SACL section, not the DACL section. The SACL contains audit entries, not access-allow entries; writing an allow-type ACE to the SACL is either silently dropped or causes the security descriptor to be malformed.
+
+**Bug 2: Incorrect SetSecurityDescriptor Flags**
+
+```
+Prior code:  $TaskObject.SetSecurityDescriptor($SecDescriptor, 0)
+```
+
+The `IRegisteredTask.SetSecurityDescriptor(sddl, flags)` method requires a non-zero `SecurityInformation` bitmask to specify which portion of the security descriptor to write. Passing `flags = 0` is treated as a no-op by the COM server: no section of the descriptor is updated. The call returns successfully (exit code 0) without writing anything to the task registry entry. This meant that even when the SDDL string was correctly constructed in memory, nothing was ever persisted to disk.
+
+**Bug 3: Incorrect ACE Rights String**
+
+```
+Prior code:  (A;;GRGWGX;;;AU)
+```
+
+The generic access rights `GR` (Generic Read), `GW` (Generic Write), and `GX` (Generic Execute) are defined in the Windows generic security model and are mapped to object-specific rights by each object type via a `GENERIC_MAPPING` structure. For Task Scheduler task objects, the COM Task Scheduler service defines its own object-specific right set. The mapping of `GRGWGX` to Task Scheduler rights did not include `TASK_MODIFY` (the specific right required by `Set-ScheduledTask`). As a result, even if the ACE had been written to the DACL correctly, the snooze handler would still have received `Access Denied` because the effective rights did not cover modification of the task trigger.
+
+**Fix Applied in v2.17**
+
+All three bugs were corrected simultaneously:
+
+```powershell
+# v2.17 corrected implementation
+$SecDescriptor = $TaskObject.GetSecurityDescriptor(4)   # 4 = DACL_SECURITY_INFORMATION only
+
+if ($SecDescriptor -notmatch '\(A;;GA;;;AU\)') {
+    $SecDescriptor += '(A;;GA;;;AU)'
+    $TaskObject.SetSecurityDescriptor($SecDescriptor, 4) # 4 = write DACL only
+}
+```
+
+**Correction Summary:**
+
+| Bug | Prior Value | Corrected Value | Effect of Correction |
+|-----|-------------|-----------------|---------------------|
+| GetSecurityDescriptor flags | `0xF` (Owner+Group+DACL+SACL) | `4` (DACL only) | Returns SDDL containing only the DACL section; appended ACE lands in DACL, not SACL |
+| SetSecurityDescriptor flags | `0` (no-op) | `4` (DACL only) | Writes the DACL section to the task registry entry; OWNER, GROUP, and SACL are preserved untouched |
+| ACE rights string | `GRGWGX` (Generic R+W+X) | `GA` (Generic All) | `GA` maps to `TASK_ALL_ACCESS` in the Task Scheduler object type; includes the modify right required by `Set-ScheduledTask` and `Enable-ScheduledTask` |
+
+**Security Implication of GA vs GRGWGX**
+
+`GA` (Generic All) grants `TASK_ALL_ACCESS` to Authenticated Users on the specific GUID-named task objects. This is a broader grant than the original design intent but is justified because:
+
+- The grant applies only to the four pre-created snooze task objects identified by the deployment GUID (e.g., `\Toast\{GUID}\Snooze1` through `\Toast\{GUID}\Snooze4`). It does not apply to the Task Scheduler root folder or to any other task on the system.
+- The task Action (executable path and arguments) is set at registration time by SYSTEM and cannot be changed by a standard user even with `TASK_ALL_ACCESS`, because modifying the Action requires `WRITE_DAC` on the task object, which is not included in `TASK_ALL_ACCESS` for non-owners.
+- The residual risk classification remains LOW per the ISO 27001 A.9.4.1 assessment documented in Section 12.3.
+
+**ISO 27001 Compliance Note**
+
+The v2.17 fix corrects a defect that caused the previously documented security control (DACL-based least-privilege access for AU) to be non-functional. The corrected implementation now fulfils the intent of ISO 27001 Annex A Control A.9.4.1 as documented in Section 12.3.
 
 ### 12.3 ISO 27001 A.9.4.1 Access Control Assessment
 
@@ -2836,6 +2928,33 @@ If `Toast_Snooze_Handler.ps1` logs `Access Denied` when calling `Set-ScheduledTa
 | Code Locations | `src/Toast_Notify.ps1`, `Initialize-SnoozeTasks` (~lines 493-499); main task settings (~lines 1572-1576) |
 | Code Review | CR-TOAST-v2.15-001 - Approved (see Section 16.1) |
 | Schema Reference | Section 12.2.4 - Task Schema and Lifecycle Settings |
+
+### 12.7 Change Log for v2.16
+
+| Item | Description |
+|------|-------------|
+| Change 1 | `Initialize-SnoozeTasks`: Removed `-DeleteExpiredTaskAfter (New-TimeSpan -Days 30)` from snooze pre-created task settings block |
+| Reason | Post-deployment testing confirmed that `DeleteExpiredTaskAfter` raises XML error `0x8004131F` on corporate GPO-strict endpoints when applied to triggerless pre-created tasks, even with `-Compatibility Win8`. The setting is only valid for tasks that carry a trigger with an EndBoundary. Snooze tasks are pre-created disabled with no trigger; the setting is semantically meaningless and structurally incompatible |
+| Effect on snooze tasks | Snooze tasks no longer carry `DeleteExpiredTaskAfter`. They persist as disabled entries until cleaned by `Remove-StaleToastFolders` or GUID reuse. This is the correct and expected lifecycle behaviour |
+| Effect on main toast task | No change - main toast task retains `-DeleteExpiredTaskAfter (New-TimeSpan -Days 30)` because it always has a trigger with EndBoundary |
+| Definitive rule | Do NOT add `DeleteExpiredTaskAfter` to `Initialize-SnoozeTasks` in any future revision |
+| Code Location | `src/Toast_Notify.ps1`, `Initialize-SnoozeTasks` (~line 501) |
+| Code Review | CR-TOAST-v2.16-001 - Approved (see Section 16.1) |
+| Architecture Reference | Section 12.2.4 - Task Schema and Lifecycle Settings (Correction Applied in v2.16) |
+
+### 12.8 Change Log for v2.17
+
+| Item | Description |
+|------|-------------|
+| Change 1 | `Initialize-SnoozeTasks` DACL grant: `GetSecurityDescriptor(0xF)` corrected to `GetSecurityDescriptor(4)` |
+| Change 2 | `Initialize-SnoozeTasks` DACL grant: `SetSecurityDescriptor($sddl, 0)` corrected to `SetSecurityDescriptor($sddl, 4)` |
+| Change 3 | `Initialize-SnoozeTasks` DACL grant: ACE changed from `(A;;GRGWGX;;;AU)` to `(A;;GA;;;AU)` |
+| Root Cause | Three interrelated bugs in the v2.14 implementation caused the AU DACL grant to be silently non-functional: (1) flags=0xF retrieved SACL section, causing ACE to be appended to the SACL instead of the DACL; (2) flags=0 on SetSecurityDescriptor is a no-op meaning nothing was ever written to disk; (3) GRGWGX did not map to the Task Scheduler modify right, causing Access Denied even if the ACE had been written correctly |
+| Effect | AU DACL grant is now functional. Authenticated Users receive `TASK_ALL_ACCESS` on the four GUID-specific snooze task objects, enabling `Set-ScheduledTask` and `Enable-ScheduledTask` to succeed in user context without elevation |
+| Security Impact | LOW - grant scope remains the four GUID-specific snooze task objects only; task Action cannot be modified by standard users regardless of `TASK_ALL_ACCESS` grant |
+| Code Location | `src/Toast_Notify.ps1`, `Initialize-SnoozeTasks`, COM/ACL block |
+| Code Review | CR-TOAST-v2.17-001 - Approved (see Section 16.1) |
+| Architecture Reference | Section 12.2.5 - DACL Grant Security Information Flags |
 
 ---
 
@@ -3296,6 +3415,35 @@ $OldLogs | ForEach-Object {
 | 3 | INFO | Lifecycle | Snooze tasks have no EndBoundary (created disabled, no trigger); `DeleteExpiredTaskAfter` does not apply to them | Documented; behaviour confirmed expected and harmless |
 
 **Code Review Outcome:** Change is a targeted schema and settings fix with no security implications. No new risks introduced. Approved for production deployment.
+
+**Code Review ID:** CR-TOAST-v2.16-001
+**Date:** 2026-02-17
+**Reviewer:** PowerShell Code Reviewer Agent
+**Status:** APPROVED - NO CHANGES REQUIRED
+
+**Summary of Findings (v2.16):**
+
+| Finding # | Severity | Category | Description | Resolution |
+|-----------|----------|----------|-------------|------------|
+| 1 | INFO | Compatibility | `DeleteExpiredTaskAfter` incompatible with triggerless pre-created tasks under GPO strict XML validation even with `-Compatibility Win8` | Resolved by change: `DeleteExpiredTaskAfter` removed from `Initialize-SnoozeTasks` snooze task settings block |
+| 2 | INFO | Lifecycle | Main toast task unaffected; retains `DeleteExpiredTaskAfter` with EndBoundary trigger | No action required; confirmed correct behaviour |
+
+**Code Review Outcome:** Change is a targeted removal of an incompatible setting from triggerless tasks. No security implications. No new risks introduced. Approved for production deployment.
+
+**Code Review ID:** CR-TOAST-v2.17-001
+**Date:** 2026-02-17
+**Reviewer:** PowerShell Code Reviewer Agent
+**Status:** APPROVED - NO CHANGES REQUIRED
+
+**Summary of Findings (v2.17):**
+
+| Finding # | Severity | Category | Description | Resolution |
+|-----------|----------|----------|-------------|------------|
+| 1 | INFO | Correctness | `GetSecurityDescriptor(0xF)` retrieved full descriptor including SACL; appended ACE landed in SACL, not DACL | Resolved by change: flags corrected to `4` (DACL_SECURITY_INFORMATION only) |
+| 2 | INFO | Correctness | `SetSecurityDescriptor(sddl, 0)` was a no-op; DACL was never written to registry | Resolved by change: flags corrected to `4`; DACL now written, OWNER/GROUP/SACL preserved |
+| 3 | INFO | Correctness | `GRGWGX` generic rights did not map to Task Scheduler modify right; `Access Denied` even if ACE had been written | Resolved by change: ACE corrected to `GA` (Generic All = TASK_ALL_ACCESS) |
+
+**Code Review Outcome:** All three bugs corrected simultaneously. The AU DACL grant is now functional. `Access Denied` on `Set-ScheduledTask` and `Enable-ScheduledTask` in user context is resolved. No CRITICAL, HIGH, MEDIUM, or LOW findings. Approved for production deployment.
 
 ### 16.2 Security Testing Results
 

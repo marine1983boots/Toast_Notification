@@ -5,6 +5,16 @@ Created by:   Ben Whitmore
 Filename:     Toast_Notify.ps1
 ===========================================================================
 
+Version 2.17 - 17/02/2026
+-FIX: Correct SetSecurityDescriptor DACL grant in Initialize-SnoozeTasks (three bugs fixed):
+  1. GetSecurityDescriptor(4) instead of (0xF) - DACL_SECURITY_INFORMATION only; avoids SACL section
+     that caused appended ACE to land in SACL instead of DACL
+  2. SetSecurityDescriptor($sddl, 4) instead of ($sddl, 0) - passing 0 is a no-op; DACL not written
+  3. (A;;GA;;;AU) instead of (A;;GRGWGX;;;AU) - GA (Generic All) maps to TASK_ALL_ACCESS; generic
+     rights GRGWGX did not correctly map to Task Scheduler modify rights
+-Changed catch block from Write-Warning to Write-Error + throw so ACL failures are visible
+-Changed regex check to (?i)A;;(?:FA|GA|GRGWGX);;;AU to match any equivalent full-access ACE
+
 Version 2.16 - 17/02/2026
 -FIX: Removed -DeleteExpiredTaskAfter from pre-created snooze tasks only (Initialize-SnoozeTasks)
 -Root cause: DeleteExpiredTaskAfter requires a trigger with EndBoundary - tasks with no trigger fail XML validation
@@ -522,26 +532,28 @@ function Initialize-SnoozeTasks {
             # NOTE: GroupId S-1-5-32-545 above controls what account the task RUNS AS,
             #       not who can MODIFY it. The task DACL is stored separately in the
             #       registry and defaults to Administrators+SYSTEM only.
-            # SDDL: (A;;GRGWGX;;;AU) = Allow Generic-Read+Write+Execute to Authenticated Users
+            # SDDL: (A;;GA;;;AU) = Allow Generic All (TASK_ALL_ACCESS) to Authenticated Users
             $TaskScheduler = $null
             try {
                 $ErrorActionPreference = 'Stop'
                 $TaskScheduler = New-Object -ComObject 'Schedule.Service'
                 $TaskScheduler.Connect()
                 $TaskObject = $TaskScheduler.GetFolder('\').GetTask($TaskName)
-                # 0xF = DACL_SECURITY_INFORMATION (retrieve owner, group, DACL, and SACL flags)
-                $SecDescriptor = $TaskObject.GetSecurityDescriptor(0xF)
-                if ($SecDescriptor -notmatch 'A;;GRGWGX;;;AU') {
-                    $SecDescriptor += '(A;;GRGWGX;;;AU)'
-                    $TaskObject.SetSecurityDescriptor($SecDescriptor, 0)
-                    Write-Output "  Granted AU modify rights: $TaskName [OK]"
+                # 4 = DACL_SECURITY_INFORMATION only (avoids SACL section that breaks ACE appending)
+                $SecDescriptor = $TaskObject.GetSecurityDescriptor(4)
+                if ($SecDescriptor -notmatch '(?i)A;;(?:FA|GA|GRGWGX);;;AU') {
+                    $SecDescriptor += '(A;;GA;;;AU)'
+                    # 4 = DACL_SECURITY_INFORMATION - CRITICAL: using 0 is a no-op and does NOT write DACL
+                    $TaskObject.SetSecurityDescriptor($SecDescriptor, 4)
+                    Write-Output "  Granted AU full access: $TaskName [OK]"
                 }
                 else {
                     Write-Output "  AU modify rights already present: $TaskName [SKIP]"
                 }
             }
             catch {
-                Write-Warning "  Failed to set task ACL for ${TaskName}: $($_.Exception.Message)"
+                Write-Error "  [FAIL] Failed to set task ACL for ${TaskName}: $($_.Exception.Message)"
+                throw
             }
             finally {
                 if ($null -ne $TaskScheduler) {
