@@ -5,6 +5,15 @@ Created by:   Ben Whitmore
 Filename:     Toast_Notify.ps1
 ===========================================================================
 
+Version 2.11 - 17/02/2026
+-SIMPLIFICATION: Merged -EnableProgressive into -Snooze (single activation switch)
+-Removed -EnableProgressive parameter (breaking change - use -Snooze instead)
+-Removed -SnoozeCount parameter (stage read exclusively from registry)
+-ActionTemplateSnooze (system snooze dropdown) removed - -Snooze now activates stage system only
+-Unified button-building: -Snooze = stage-aware buttons, no -Snooze = Learn More + Dismiss only
+-Registry is authoritative for stage state (SnoozeCount always read from registry when -Snooze set)
+-Pre-created task arguments now use -Snooze only (not -EnableProgressive -SnoozeCount N)
+
 Version 2.10 - 16/02/2026
 -CLEANUP: Removed all remaining fallback-related comments and messages
 -Simplified error handling messages for clearer debugging
@@ -144,7 +153,9 @@ CustomMessage.xml
 Specify the name of the XML file to read. The XML file must exist in the same directory as Toast_Notify.ps1. If no parameter is passed, it is assumed the XML file is called CustomMessage.xml.
 
 .PARAMETER Snooze
-Add a snooze option to the Toast
+Activates the progressive 5-stage snooze enforcement system. Registry tracks stage state (0-4).
+Stage 0: initial, Stages 1-2: progressively shorter snooze, Stage 3: final warning (no snooze),
+Stage 4: forced reboot notification. Without this switch: plain notification with Learn More + Dismiss only.
 
 .PARAMETER ToastScenario
 Specify the toast notification scenario type. Valid values:
@@ -152,16 +163,6 @@ Specify the toast notification scenario type. Valid values:
 - urgent: High priority, bypasses Focus Assist, standard notification sound
 - reminder: Persistent reminder, can be suppressed by Focus Assist, stays in Action Center
 - default: Standard notification behavior
-
-.PARAMETER EnableProgressive
-Enable progressive snooze enforcement with 5-stage escalation (0-4).
-When enabled, each snooze increments a counter stored in registry.
-Stage progression: 0 (initial) -> 1 -> 2 -> 3 (urgent) -> 4 (alarm/non-dismissible)
-Default: $false (classic single-snooze behavior)
-
-.PARAMETER SnoozeCount
-Current snooze count (0-4). Automatically managed via registry in progressive mode.
-Only used when EnableProgressive is $true.
 
 .PARAMETER Priority
 Set toast notification priority to High for Focus Assist bypass attempts.
@@ -220,36 +221,28 @@ Toast_Notify.ps1 -ToastScenario "urgent"
 Toast_Notify.ps1 -XMLSource "Maintenance.xml" -ToastScenario "reminder" -Snooze
 
 .EXAMPLE
-Toast_Notify.ps1 -EnableProgressive -XMLSource "CustomMessage.xml"
-Enables progressive enforcement with stage-specific messages from XML
-
-.EXAMPLE
 Toast_Notify.ps1 -ForceDisplay -XMLSource "CriticalAlert.xml"
 Maximum visibility mode for critical notifications
 
 .EXAMPLE
-Toast_Notify.ps1 -EnableProgressive -SnoozeCount 2 -ToastGUID "ABC123"
-Displays Stage 2 toast (2 of 4 snoozes used) for specified GUID
+Toast_Notify.ps1 -Snooze -XMLSource "CustomMessage.xml"
+Stage-managed notification starting at Stage 0 (2-hour snooze interval)
 
 .EXAMPLE
-Toast_Notify.ps1 -EnableProgressive -RegistryHive HKCU
-Per-user toast state stored in HKCU (no elevation required)
+Toast_Notify.ps1 -Snooze -RegistryHive HKCU
+Per-user stage state stored in HKCU (no elevation required)
 
 .EXAMPLE
-Toast_Notify.ps1 -EnableProgressive -WorkingDirectory "D:\CustomToasts"
+Toast_Notify.ps1 -Snooze -WorkingDirectory "D:\CustomToasts"
 Custom working directory with organized folder structure: D:\CustomToasts\{GUID}\Logs\ and Scripts\
 
 .EXAMPLE
-Toast_Notify.ps1 -EnableProgressive -WorkingDirectory "C:\ProgramData\Notifications" -CleanupDaysThreshold 7
+Toast_Notify.ps1 -Snooze -WorkingDirectory "C:\ProgramData\Notifications" -CleanupDaysThreshold 7
 Custom location with aggressive cleanup (removes toast folders older than 7 days)
 
 .EXAMPLE
 Toast_Notify.ps1 -Dismiss -XMLSource "InformationalMessage.xml"
 Informational toast with dismiss button visible (user can close without action)
-
-.EXAMPLE
-Toast_Notify.ps1 -EnableProgressive
-Progressive enforcement without dismiss button (forces user to snooze or reboot)
 #>
 
 [CmdletBinding()]
@@ -265,11 +258,6 @@ Param
     [Parameter(Mandatory = $False)]
     [ValidatePattern('^[A-F0-9\-]{1,36}$')]
     [String]$ToastGUID,
-    [Parameter(Mandatory = $False)]
-    [Switch]$EnableProgressive,
-    [Parameter(Mandatory = $False)]
-    [ValidateRange(0, 4)]
-    [Int]$SnoozeCount = 0,
     [Parameter(Mandatory = $False)]
     [Switch]$Priority,
     [Parameter(Mandatory = $False)]
@@ -409,12 +397,13 @@ function Initialize-ToastRegistry {
 function Initialize-SnoozeTasks {
     <#
     .SYNOPSIS
-        Pre-creates disabled scheduled tasks for progressive snooze stages
+        Pre-creates disabled scheduled tasks for snooze stages
     .DESCRIPTION
         Creates 4 disabled scheduled tasks during SYSTEM deployment that will be activated
         by the snooze handler running in USER context. This solves the permission issue where
         standard users cannot create scheduled tasks but CAN modify existing ones.
 
+        Used when deploying a toast notification with -Snooze enabled.
         This is the enterprise-grade PSADT pattern: SYSTEM creates, USER modifies.
     .PARAMETER ToastGUID
         Unique identifier for this toast instance
@@ -432,19 +421,14 @@ function Initialize-SnoozeTasks {
         [String]$ToastScriptPath
     )
 
-    # Only create tasks if running as SYSTEM and EnableProgressive is enabled
+    # Only create tasks if running as SYSTEM (called by -Snooze deployment block)
     $CurrentIdentity = ([System.Security.Principal.WindowsIdentity]::GetCurrent()).Name
     if ($CurrentIdentity -ne "NT AUTHORITY\SYSTEM") {
         Write-Verbose "Not running as SYSTEM - skipping task pre-creation"
         return $false
     }
 
-    if (-not $EnableProgressive) {
-        Write-Verbose "Progressive mode not enabled - skipping task pre-creation"
-        return $false
-    }
-
-    Write-Output "Pre-creating snooze scheduled tasks for progressive mode..."
+    Write-Output "Pre-creating snooze scheduled tasks..."
     $SuccessCount = 0
 
     for ($i = 1; $i -le 4; $i++) {
@@ -462,7 +446,7 @@ function Initialize-SnoozeTasks {
             # Create task action
             $Task_Action = New-ScheduledTaskAction `
                 -Execute "C:\WINDOWS\system32\WindowsPowerShell\v1.0\PowerShell.exe" `
-                -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""$ToastScriptPath"" -ToastGUID ""$ToastGUID"" -EnableProgressive -SnoozeCount $i"
+                -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""$ToastScriptPath"" -ToastGUID ""$ToastGUID"" -Snooze"
 
             # Create principal (USERS group - allows all users to modify)
             $Task_Principal = New-ScheduledTaskPrincipal -GroupId "S-1-5-32-545" -RunLevel Limited
@@ -476,7 +460,7 @@ function Initialize-SnoozeTasks {
 
             # Create task (no trigger - will be set by snooze handler)
             $New_Task = New-ScheduledTask `
-                -Description "Progressive Toast Notification - Snooze $i (pre-created, disabled until activated by snooze handler)" `
+                -Description "Toast Notification - Snooze Stage $i (pre-created, disabled until activated by snooze handler)" `
                 -Action $Task_Action `
                 -Principal $Task_Principal `
                 -Settings $Task_Settings
@@ -1239,14 +1223,6 @@ If ($ForceDisplay) {
     Write-Warning "ForceDisplay cannot guarantee Focus Assist bypass on all systems"
 }
 
-#Validate progressive mode parameters
-If ($EnableProgressive) {
-    Write-Verbose "Progressive mode enabled - validating SnoozeCount parameter"
-    if ($SnoozeCount -lt 0 -or $SnoozeCount -gt 4) {
-        throw "SnoozeCount must be between 0 and 4 when EnableProgressive is enabled"
-    }
-}
-
 #Current Directory
 $ScriptPath = $MyInvocation.MyCommand.Path
 $CurrentDir = Split-Path $ScriptPath
@@ -1328,8 +1304,8 @@ If ($XMLValid -eq $True) {
 
         Write-Output "Running in SYSTEM context - Initializing deployment..."
 
-        #Initialize Registry State if progressive mode enabled
-        If ($EnableProgressive) {
+        #Initialize Registry State if snooze mode enabled
+        If ($Snooze) {
             Write-Output "Initializing registry for ToastGUID: $ToastGUID"
             $RegInitResult = Initialize-ToastRegistry -ToastGUID $ToastGUID -RegistryHive $RegistryHive -RegistryPath $RegistryPath
             if (!$RegInitResult) {
@@ -1442,7 +1418,7 @@ If ($XMLValid -eq $True) {
         $New_ToastPath = Join-Path $ToastPath "Toast_Notify.ps1"
 
         # Update protocol handler command now that files are staged
-        If ($EnableProgressive) {
+        If ($Snooze) {
             try {
                 $HandlerPath = Join-Path $ToastPath "Toast_Snooze_Handler.ps1"
                 $CommandKey = "Registry::HKEY_CLASSES_ROOT\toast-snooze\shell\open\command"
@@ -1509,9 +1485,6 @@ If ($XMLValid -eq $True) {
         If ($Snooze) {
             $TaskArguments += " -Snooze"
         }
-        If ($EnableProgressive) {
-            $TaskArguments += " -EnableProgressive -SnoozeCount 0"
-        }
         If ($Priority) {
             $TaskArguments += " -Priority"
         }
@@ -1536,48 +1509,25 @@ If ($XMLValid -eq $True) {
         Write-Output "========================================="
         Write-Output "Toast Notification - User Context Execution"
         Write-Output "ToastGUID: $ToastGUID"
-        Write-Output "EnableProgressive: $EnableProgressive"
-        Write-Output "SnoozeCount Parameter: $SnoozeCount"
+        Write-Output "Snooze (Stage Mode): $Snooze"
         Write-Output "Priority: $Priority"
         Write-Output "ForceDisplay: $ForceDisplay"
         Write-Output "Timestamp: $(Get-Date -Format 's')"
         Write-Output "========================================="
+        $SnoozeCount = 0  # Will be read from registry if -Snooze is active
 
-        #Handle progressive mode - read authoritative SnoozeCount from registry
-        If ($EnableProgressive) {
+        #Handle snooze mode - read authoritative SnoozeCount from registry
+        If ($Snooze) {
             $RegState = Get-ToastState -ToastGUID $ToastGUID -RegistryHive $RegistryHive -RegistryPath $RegistryPath
             if ($RegState) {
-                $RegistrySnoozeCount = $RegState.SnoozeCount
-                Write-Output "Registry SnoozeCount: $RegistrySnoozeCount"
-                Write-Output "Parameter SnoozeCount: $SnoozeCount"
-
-                # CRITICAL: Validate registry matches parameter (detect desynchronization)
-                if ($RegistrySnoozeCount -ne $SnoozeCount) {
-                    Write-Warning "Registry/parameter mismatch detected!"
-                    Write-Warning "  Registry: $RegistrySnoozeCount"
-                    Write-Warning "  Parameter: $SnoozeCount"
-
-                    if ($TestMode) {
-                        Write-Warning "[TEST MODE] Using parameter value instead of registry for testing"
-                    }
-                    else {
-                        Write-Warning "Using registry value as authoritative source"
-                        $SnoozeCount = $RegistrySnoozeCount
-                    }
-                }
-                else {
-                    $SnoozeCount = $RegistrySnoozeCount
-                }
-
-                Write-Output "Using SnoozeCount: $SnoozeCount (Source: $(if($TestMode){'Parameter (TestMode)'}else{'Registry'}))"
+                $SnoozeCount = $RegState.SnoozeCount
+                Write-Output "Registry SnoozeCount: $SnoozeCount (Source: Registry)"
             }
             else {
-                Write-Warning "Registry state not found for ToastGUID: $ToastGUID"
-                Write-Warning "This may indicate first run or registry initialization failure"
-                Write-Warning "Using parameter value: $SnoozeCount"
+                Write-Warning "Registry state not found for ToastGUID: $ToastGUID - using default SnoozeCount: 0"
             }
 
-            # Early validation for SnoozeCount range
+            # Validate range (detect registry corruption)
             if ($SnoozeCount -lt 0 -or $SnoozeCount -gt 4) {
                 Write-Error "CRITICAL: Invalid SnoozeCount from registry: $SnoozeCount (valid: 0-4)"
                 Stop-Transcript
@@ -1715,8 +1665,8 @@ If ($XMLValid -eq $True) {
             throw
         }
 
-        #Get stage configuration if progressive mode enabled
-        If ($EnableProgressive) {
+        #Get stage configuration if snooze mode enabled
+        If ($Snooze) {
             $StageConfig = Get-StageDetails -SnoozeCount $SnoozeCount
             Write-Output "Toast Stage: $($StageConfig.Stage) ($($StageConfig.VisualUrgency))"
             Write-Output "Scenario: $($StageConfig.Scenario)"
@@ -1796,7 +1746,7 @@ If ($XMLValid -eq $True) {
         # Determine audio based on stage (if progressive) or default
         $AudioSrc = "ms-winsoundevent:notification.default"
         $AudioLoop = ""
-        If ($EnableProgressive -and $StageConfig.AudioLoop) {
+        If ($Snooze -and $StageConfig.AudioLoop) {
             $AudioSrc = "ms-winsoundevent:notification.looping.alarm"
             $AudioLoop = 'loop="true"'
             Write-Output "Using looping alarm audio for Stage $($StageConfig.Stage)"
@@ -1828,10 +1778,10 @@ If ($XMLValid -eq $True) {
 </toast>
 "@
 
-        #Build action buttons based on mode (Classic vs Progressive)
-        If ($EnableProgressive) {
-            # Progressive mode: Build stage-specific actions
-            Write-Output "Building progressive mode actions for Stage $SnoozeCount"
+        #Build action buttons based on mode (Snooze vs Simple)
+        If ($Snooze) {
+            # Snooze mode: Build stage-specific actions
+            Write-Output "Building snooze stage actions for Stage $SnoozeCount"
 
             # XML-encode button titles
             $ButtonTitle_Safe = ConvertTo-XmlSafeString $ButtonTitle
@@ -1888,32 +1838,10 @@ If ($XMLValid -eq $True) {
             $Action_Node = $ActionTemplate.toast.actions
         }
         Else {
-            # Classic mode: Use original snooze dropdown or simple actions
-
-            # XML-encode button values
+            # Simple notification: Learn More + Dismiss only
             $ButtonTitle_Safe = ConvertTo-XmlSafeString $ButtonTitle
             $ButtonAction_Safe = ConvertTo-XmlSafeString $ButtonAction
-            $SnoozeTitle_Safe = ConvertTo-XmlSafeString $SnoozeTitle
 
-            #Build XML ActionTemplateSnooze (Used when $Snooze is passed as a parameter)
-            [xml]$ActionTemplateSnooze = @"
-<toast>
-    <actions>
-        <input id="SnoozeTimer" type="selection" title="Select a Snooze Interval" defaultInput="1">
-            <selection id="1" content="1 Minute"/>
-            <selection id="30" content="30 Minutes"/>
-            <selection id="60" content="1 Hour"/>
-            <selection id="120" content="2 Hours"/>
-            <selection id="240" content="4 Hours"/>
-        </input>
-        <action activationType="system" arguments="snooze" hint-inputId="SnoozeTimer" content="$SnoozeTitle_Safe" id="test-snooze"/>
-        <action arguments="$ButtonAction_Safe" content="$ButtonTitle_Safe" activationType="protocol" />
-        <action arguments="dismiss" content="Dismiss" activationType="system"/>
-    </actions>
-</toast>
-"@
-
-            #Build XML ActionTemplate (Used when $Snooze is not passed as a parameter)
             [xml]$ActionTemplate = @"
 <toast>
     <actions>
@@ -1922,16 +1850,7 @@ If ($XMLValid -eq $True) {
     </actions>
 </toast>
 "@
-
-            #If the Snooze parameter was passed, add additional XML elements to Toast
-            If ($Snooze) {
-                #Define default and snooze actions to be added $ToastTemplate
-                $Action_Node = $ActionTemplateSnooze.toast.actions
-            }
-            else {
-                #Define default actions to be added $ToastTemplate
-                $Action_Node = $ActionTemplate.toast.actions
-            }
+            $Action_Node = $ActionTemplate.toast.actions
         }
 
         #Append actions to $ToastTemplate
@@ -2091,7 +2010,7 @@ If ($XMLValid -eq $True) {
             Write-Verbose "Toast display operation completed: Success=$ToastDisplaySucceeded"
         }
         # Continue with progressive logic (only if toast succeeded)
-        If ($ToastDisplaySucceeded -and $EnableProgressive) {
+        If ($ToastDisplaySucceeded -and $Snooze) {
             Write-Output "Progressive Stage: $SnoozeCount"
 
             # Stage 4: Trigger automatic reboot countdown

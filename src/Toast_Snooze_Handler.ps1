@@ -5,6 +5,11 @@ Created by:   Ben Whitmore (with AI assistance)
 Filename:     Toast_Snooze_Handler.ps1
 ===========================================================================
 
+Version 1.6 - 17/02/2026
+-Updated error messages: -EnableProgressive parameter renamed to -Snooze
+-Removed -SnoozeCount 0 from deployment command examples
+-No logic changes (snooze handler behavior unchanged)
+
 Version 1.5.4 - 16/02/2026
 -DIAGNOSTIC: Enhanced logging for trigger activation troubleshooting
 -Added detailed diagnostics for Set-ScheduledTask and Enable-ScheduledTask operations
@@ -342,11 +347,11 @@ try {
         Write-Error "This error indicates incorrect deployment or GPO restrictions."
         Write-Error ""
         Write-Error "SOLUTIONS:"
-        Write-Error "1. Re-deploy Toast_Notify.ps1 as SYSTEM with -EnableProgressive"
+        Write-Error "1. Re-deploy Toast_Notify.ps1 as SYSTEM with -Snooze"
         Write-Error "   This will automatically grant necessary permissions to BUILTIN\Users"
         Write-Error ""
         Write-Error "2. Deploy with -RegistryHive HKCU for per-user state (no permissions needed)"
-        Write-Error "   Example: Toast_Notify.ps1 -EnableProgressive -RegistryHive HKCU"
+        Write-Error "   Example: Toast_Notify.ps1 -Snooze -RegistryHive HKCU"
         Write-Error ""
         Write-Error "3. Manually grant permissions (PowerShell as Admin):"
         Write-Error "   `$Path = '$RegPath'"
@@ -517,7 +522,7 @@ try {
         Write-Output "========================================="
     }
     catch [Microsoft.Management.Infrastructure.CimException] {
-        # Task doesn't exist - means Toast_Notify.ps1 wasn't deployed with -EnableProgressive as SYSTEM
+        # Task doesn't exist - means Toast_Notify.ps1 wasn't deployed with -Snooze as SYSTEM
         Write-Error "========================================"
         Write-Error "PRE-CREATED TASK NOT FOUND"
         Write-Error "========================================"
@@ -527,18 +532,16 @@ try {
         Write-Error ""
         Write-Error "ROOT CAUSE:"
         Write-Error "Standard users CANNOT create scheduled tasks (Windows security by design)."
-        Write-Error "Toast_Notify.ps1 must be deployed as SYSTEM with -EnableProgressive to pre-create"
+        Write-Error "Toast_Notify.ps1 must be deployed as SYSTEM with -Snooze to pre-create"
         Write-Error "the required disabled tasks. Standard users can then modify these existing tasks."
         Write-Error ""
         Write-Error "SOLUTION:"
-        Write-Error "1. Re-deploy Toast_Notify.ps1 as SYSTEM with -EnableProgressive parameter"
+        Write-Error "1. Re-deploy Toast_Notify.ps1 as SYSTEM with -Snooze parameter"
         Write-Error "   This will pre-create 4 disabled scheduled tasks (Snooze1-4)"
         Write-Error ""
         Write-Error "Deployment command (run as SYSTEM via SCCM/Intune):"
         Write-Error "   powershell.exe -ExecutionPolicy Bypass -File Toast_Notify.ps1 \"
-        Write-Error "       -ToastGUID ""$ToastGUID"" \"
-        Write-Error "       -EnableProgressive \"
-        Write-Error "       -SnoozeCount 0"
+        Write-Error "       -ToastGUID ""$ToastGUID"" -Snooze"
         Write-Error ""
         Write-Error "After deployment, verify tasks exist in Task Scheduler:"
         Write-Error "   Toast_Notification_{GUID}_Snooze1 [DISABLED]"
@@ -565,7 +568,7 @@ try {
         Write-Error "3. Task was not created with USERS group principal"
         Write-Error ""
         Write-Error "SOLUTION:"
-        Write-Error "Re-deploy Toast_Notify.ps1 as SYSTEM with -EnableProgressive to ensure"
+        Write-Error "Re-deploy Toast_Notify.ps1 as SYSTEM with -Snooze to ensure"
         Write-Error "tasks are created with correct permissions (USERS group principal)."
         Write-Error ""
         Write-Error "Error Details: $($_.Exception.Message)"
