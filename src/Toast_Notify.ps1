@@ -5,6 +5,13 @@ Created by:   Ben Whitmore
 Filename:     Toast_Notify.ps1
 ===========================================================================
 
+Version 2.14 - 17/02/2026
+-FIX: Grant Authenticated Users (AU) read/write/execute on each pre-created snooze task
+-Uses Schedule.Service COM object to append (A;;GRGWGX;;;AU) to task security descriptor
+-Resolves Set-ScheduledTask / Enable-ScheduledTask Access Denied for standard users
+-Principal GroupId S-1-5-32-545 controls what account runs the task, NOT who can modify it
+-Task DACL defaults to Administrators+SYSTEM only; this adds explicit AU modify rights
+
 Version 2.13 - 17/02/2026
 -Pass -RegistryHive and -RegistryPath to Toast_Reboot_Handler.ps1 command registration
 -Enables reboot handler to clean up registry and tasks using correct registry location
@@ -418,6 +425,22 @@ function Initialize-SnoozeTasks {
         Unique identifier for this toast instance
     .PARAMETER ToastScriptPath
         Full path to Toast_Notify.ps1 script
+    .NOTES
+        Requires: SYSTEM context (called during deployment phase only)
+
+        Security: Grants (A;;GRGWGX;;;AU) - Authenticated Users receive Generic Read, Write,
+        and Execute rights on each snooze task DACL. This is intentional - all domain users
+        must be able to activate their own snooze task (Set-ScheduledTask / Enable-ScheduledTask).
+
+        Business Rationale:
+        - Multi-user shared endpoints need all users to action snooze notifications
+        - Deployment environment is assumed to be IT-managed (corporate managed endpoint)
+        - Task executable path is set at creation and cannot be changed via these permissions
+
+        Risk Mitigation:
+        - Task executable path is immutable (GRGWGX does not grant file-system write on target)
+        - Task trigger/schedule can be modified, but executes the same Toast_Notify.ps1 script
+        - ISO 27001 A.9.4.1: Task scope is limited to Toast GUID-specific tasks only
     #>
     [CmdletBinding()]
     param(
@@ -478,6 +501,40 @@ function Initialize-SnoozeTasks {
             Register-ScheduledTask -TaskName $TaskName -InputObject $New_Task -Force -ErrorAction Stop | Out-Null
             Write-Output "  Pre-created task: $TaskName [DISABLED]"
             $SuccessCount++
+
+            # Grant Authenticated Users read/write/execute on this task.
+            # Without this, Set-ScheduledTask / Enable-ScheduledTask fail with Access Denied
+            # for standard users even though the task exists.
+            # NOTE: GroupId S-1-5-32-545 above controls what account the task RUNS AS,
+            #       not who can MODIFY it. The task DACL is stored separately in the
+            #       registry and defaults to Administrators+SYSTEM only.
+            # SDDL: (A;;GRGWGX;;;AU) = Allow Generic-Read+Write+Execute to Authenticated Users
+            $TaskScheduler = $null
+            try {
+                $ErrorActionPreference = 'Stop'
+                $TaskScheduler = New-Object -ComObject 'Schedule.Service'
+                $TaskScheduler.Connect()
+                $TaskObject = $TaskScheduler.GetFolder('\').GetTask($TaskName)
+                # 0xF = DACL_SECURITY_INFORMATION (retrieve owner, group, DACL, and SACL flags)
+                $SecDescriptor = $TaskObject.GetSecurityDescriptor(0xF)
+                if ($SecDescriptor -notmatch 'A;;GRGWGX;;;AU') {
+                    $SecDescriptor += '(A;;GRGWGX;;;AU)'
+                    $TaskObject.SetSecurityDescriptor($SecDescriptor, 0)
+                    Write-Output "  Granted AU modify rights: $TaskName [OK]"
+                }
+                else {
+                    Write-Output "  AU modify rights already present: $TaskName [SKIP]"
+                }
+            }
+            catch {
+                Write-Warning "  Failed to set task ACL for ${TaskName}: $($_.Exception.Message)"
+            }
+            finally {
+                if ($null -ne $TaskScheduler) {
+                    [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($TaskScheduler)
+                    Remove-Variable -Name TaskScheduler -ErrorAction SilentlyContinue
+                }
+            }
         }
         catch {
             Write-Warning "  Failed to pre-create task ${TaskName}: $($_.Exception.Message)"

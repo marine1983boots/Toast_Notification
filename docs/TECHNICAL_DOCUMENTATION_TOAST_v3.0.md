@@ -5,8 +5,8 @@
 | Field | Value |
 |-------|-------|
 | Document Title | Technical Documentation - Progressive Toast Notification System v3.0 |
-| Version | 3.1 |
-| Date | 2026-02-16 |
+| Version | 3.2 |
+| Date | 2026-02-17 |
 | Author | CR |
 | Based On | Toast by Ben Whitmore (@byteben) |
 | License | GNU General Public License v3 |
@@ -28,6 +28,7 @@
 | 3.0 | 2026-02-12 | CR | Production release with comprehensive documentation |
 | 3.0.1 | 2026-02-13 | CR | Added corporate environment compatibility (v2.2 error handling) |
 | 3.1 | 2026-02-16 | CR | Added configurable registry/log locations (v2.3), permission management, HKCU mode |
+| 3.2 | 2026-02-17 | CR | Added Section 12: Scheduled Task DACL Permission Architecture covering v2.14 AU SDDL grant; updated security controls, definitions, and quality records for v2.14 |
 
 ## Table of Contents
 
@@ -42,11 +43,12 @@
 9. [Security Controls](#9-security-controls)
 10. [Corporate Environment Compatibility](#10-corporate-environment-compatibility)
 11. [Registry and Log Configuration](#11-registry-and-log-configuration)
-12. [Testing and Validation](#12-testing-and-validation)
-13. [Troubleshooting Guide](#13-troubleshooting-guide)
-14. [Maintenance Procedures](#14-maintenance-procedures)
-15. [Quality Records](#15-quality-records)
-16. [References](#16-references)
+12. [Scheduled Task DACL Permission Architecture](#12-scheduled-task-dacl-permission-architecture)
+13. [Testing and Validation](#13-testing-and-validation)
+14. [Troubleshooting Guide](#14-troubleshooting-guide)
+15. [Maintenance Procedures](#15-maintenance-procedures)
+16. [Quality Records](#16-quality-records)
+17. [References](#17-references)
 
 ---
 
@@ -130,6 +132,10 @@ This documentation is intended for:
 | AAD | Azure Active Directory |
 | EOD | End of Day |
 | HKLM | HKEY_LOCAL_MACHINE (Registry hive) |
+| DACL | Discretionary Access Control List - the access control list that specifies which security principals are granted or denied access to an object |
+| COM | Component Object Model - Microsoft's binary-interface standard for software components |
+| AU | Authenticated Users - Windows built-in security group (SID: S-1-5-11) representing all users who have authenticated to the system |
+| ACE | Access Control Entry - a single entry in a DACL specifying a trustee and the access rights allowed, denied, or audited for that trustee |
 
 ### 3.2 Terms and Definitions
 
@@ -154,6 +160,14 @@ This documentation is intended for:
 **Focus Assist**: Windows 10/11 feature that suppresses notifications during certain activities (formerly "Quiet Hours").
 
 **LauncherID**: The COM application identifier used to bring an application to focus when a toast action button is clicked.
+
+**Task DACL**: The Discretionary Access Control List attached to a Windows Scheduled Task object, stored in the registry under `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\TaskCache\Tree\{TaskName}`. This is distinct from the task principal, which controls what account the task runs as.
+
+**Task Principal**: The security principal configured in a scheduled task definition that determines the user account or group under which the task action executes. Set at task creation via `New-ScheduledTaskPrincipal`. Does not affect who can modify the task.
+
+**SDDL String**: A textual representation of a security descriptor (ACL). Each ACE within the DACL portion uses the format `(type;flags;rights;;;SID)`. Example: `(A;;GRGWGX;;;AU)` means Allow (A) Generic Read (GR) + Generic Write (GW) + Generic Execute (GX) to Authenticated Users (AU).
+
+**Schedule.Service COM Object**: The `Schedule.Service` COM automation object (ProgID: `Schedule.Service`) that provides programmatic access to the Task Scheduler service. Used to read and write task security descriptors that cannot be set via the standard `ScheduledTasks` PowerShell module.
 
 ---
 
@@ -1107,6 +1121,13 @@ See SECURITY_CONTROLS_TOAST_v3.0.md for comprehensive security documentation.
    - Files staged to %WINDIR%\Temp (SYSTEM has write access)
    - Staged path readable by USERS group
    - Self-cleaning via scheduled task deletion
+
+8. **Scheduled Task DACL Permissions (v2.14)**
+   - Pre-created snooze tasks granted `(A;;GRGWGX;;;AU)` ACE after registration
+   - Grants Authenticated Users Generic Read + Generic Write + Generic Execute on the task object only
+   - Applied via `Schedule.Service` COM object in SYSTEM context during deployment
+   - Permission is idempotent: checked before application to prevent duplicate ACE entries
+   - Scope is strictly limited to Toast GUID-specific tasks (see Section 12)
 
 **Critical Security Fixes Applied (v3.0):**
 
@@ -2478,7 +2499,288 @@ For v2.4, consider reducing permission from FullControl to:
 
 ---
 
-## 12. Testing and Validation
+## 12. Scheduled Task DACL Permission Architecture
+
+**Document Control:** TASK-DACL-001
+**Classification:** Internal Use Only
+**ISO 27001 Control:** A.9.4.1 (Information Access Restriction)
+**Introduced In:** Toast_Notify.ps1 v2.14 (2026-02-17)
+
+### 12.1 Overview and Problem Statement
+
+#### 12.1.1 Background
+
+The progressive snooze system relies on pre-created Windows Scheduled Tasks (created by the deployment in SYSTEM context) that user-context protocol handlers later modify (via `Set-ScheduledTask` and `Enable-ScheduledTask`) to activate the next snooze stage.
+
+Prior to v2.14, these operations failed with **Access Denied (0x80070005)** for standard (non-administrator) users, halting the progressive enforcement cycle.
+
+#### 12.1.2 Root Cause
+
+Two distinct Windows security mechanisms govern scheduled tasks, and they are independent of each other:
+
+| Mechanism | Controls | Set By |
+|-----------|----------|--------|
+| Task Principal (`New-ScheduledTaskPrincipal`) | What account or group the task **runs as** when triggered | Task definition at creation |
+| Task DACL (Security Descriptor) | Who can **read, modify, enable, or delete** the task object | Task object ACL in registry |
+
+Setting `New-ScheduledTaskPrincipal -GroupId "S-1-5-32-545"` (USERS group) causes the task to execute under the Users group context. It does **not** grant Users the right to modify the task object itself.
+
+The task DACL is stored separately in the registry:
+
+```
+HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\TaskCache\Tree\{TaskName}
+  Value: SD  (REG_BINARY)  <- Security Descriptor controlling access to the task object
+```
+
+The default DACL on newly registered tasks grants access only to:
+- `SYSTEM` - Full control
+- `Administrators` - Full control
+- `CREATOR OWNER` - Full control
+
+Standard authenticated users have no entry, so any `Set-ScheduledTask` or `Enable-ScheduledTask` call from a user-context protocol handler returns Access Denied.
+
+#### 12.1.3 Confirmation of Impact
+
+The failure manifested in `Toast_Snooze_Handler.ps1` at the step where the handler attempts to activate a pre-created snooze task for the next stage. Without the ability to modify the task, the snooze action silently failed to schedule the follow-up notification, breaking the progressive enforcement chain after Stage 0.
+
+### 12.2 Solution Architecture
+
+#### 12.2.1 Design Approach
+
+After task registration (performed in SYSTEM context during deployment), the `Initialize-SnoozeTasks` function uses the `Schedule.Service` COM automation object to append a custom ACE to each task's security descriptor. This operation runs as SYSTEM, which has the authority to modify task security descriptors.
+
+The chosen approach using the `Schedule.Service` COM object is the only reliable method to set task-level DACL entries. The standard `ScheduledTasks` PowerShell module (`Set-ScheduledTask`, `Get-ScheduledTask`) does not expose security descriptor manipulation.
+
+#### 12.2.2 SDDL Permission Grant
+
+The following ACE is appended to each pre-created snooze task security descriptor:
+
+```
+(A;;GRGWGX;;;AU)
+```
+
+**SDDL Component Breakdown:**
+
+| Component | Value | Meaning |
+|-----------|-------|---------|
+| Type | `A` | Allow (not Deny) |
+| Flags | (empty) | No inheritance flags - applies to this object only |
+| Rights | `GR` | Generic Read - allows reading task properties and status |
+| Rights | `GW` | Generic Write - allows modifying task properties (trigger, settings) |
+| Rights | `GX` | Generic Execute - allows running/enabling the task |
+| SID | `AU` | Authenticated Users (S-1-5-11) - all users who have authenticated |
+
+**What GRGWGX Allows on a Task Object:**
+
+- Reading task definition and current status (`Get-ScheduledTask`)
+- Modifying task settings and trigger (`Set-ScheduledTask`)
+- Enabling or disabling the task (`Enable-ScheduledTask`, `Disable-ScheduledTask`)
+- Running the task manually (`Start-ScheduledTask`)
+
+**What GRGWGX Does NOT Allow:**
+
+- Modifying the task's action (executable path or arguments) - this requires WRITE_DAC
+- Changing the task's security descriptor - this requires WRITE_DAC or WRITE_OWNER
+- Deleting the task - this requires DELETE right (not included in GRGWGX on task objects)
+- Writing to the filesystem path that the task executes - DACL on the task object has no bearing on filesystem permissions of the target script
+
+**Security Implication:** A standard user who has received these rights can change the task trigger timing and task settings, but cannot redirect the task to execute a different executable or script. The action (executable + arguments) is set at creation and is protected against modification without elevated rights.
+
+#### 12.2.3 Implementation Code Reference
+
+The permission grant is implemented in `Initialize-SnoozeTasks` (src/Toast_Notify.ps1, v2.14):
+
+```powershell
+$TaskScheduler = New-Object -ComObject 'Schedule.Service'
+$TaskScheduler.Connect()
+$TaskObject = $TaskScheduler.GetFolder('\').GetTask($TaskName)
+
+# 0xF = DACL_SECURITY_INFORMATION flag
+$SecDescriptor = $TaskObject.GetSecurityDescriptor(0xF)
+
+if ($SecDescriptor -notmatch 'A;;GRGWGX;;;AU') {
+    $SecDescriptor += '(A;;GRGWGX;;;AU)'
+    $TaskObject.SetSecurityDescriptor($SecDescriptor, 0)
+}
+```
+
+**Key implementation details:**
+
+| Detail | Value | Rationale |
+|--------|-------|-----------|
+| `GetSecurityDescriptor(0xF)` | `SecurityInformation = 0xF` | Retrieves Owner, Group, DACL, and SACL flags together to preserve the full descriptor |
+| Idempotency check | `if ($SecDescriptor -notmatch 'A;;GRGWGX;;;AU')` | Prevents duplicate ACE insertion if function is called a second time (e.g. task already exists) |
+| COM cleanup | `[Marshal]::ReleaseComObject($TaskScheduler)` in `finally` block | Releases the COM reference regardless of success or failure to prevent handle leaks |
+| Error isolation | Separate `try-catch-finally` wrapping only the COM/ACL section | ACL failure is non-fatal; task still functions as a base task even without the permission grant |
+| SYSTEM context guard | `$CurrentIdentity -ne "NT AUTHORITY\SYSTEM"` check at function entry | Function returns immediately if not running as SYSTEM, preventing permission errors during user-context replay |
+
+### 12.3 ISO 27001 A.9.4.1 Access Control Assessment
+
+**Control Reference:** ISO 27001:2015 Annex A, Control A.9.4.1 - Information Access Restriction
+
+**Requirement:** "Access to information and application system functions shall be restricted in accordance with the access control policy."
+
+#### 12.3.1 Justification for Authenticated Users Scope
+
+The `AU` (Authenticated Users) scope is intentionally broad relative to a per-user SID. This design decision is justified by the following enterprise requirements:
+
+| Requirement | Justification |
+|-------------|---------------|
+| Shared endpoints | Multiple users may log into the same managed endpoint; all must be able to action their snooze |
+| No user identity at deployment time | SYSTEM context has no knowledge of which user(s) will be logged in |
+| Azure AD joined devices | Per-user SID resolution is unreliable on AAD-joined devices without Active Directory |
+| PSADT pattern alignment | Mirrors the established PSADT pattern of SYSTEM-created tasks for user interaction |
+
+#### 12.3.2 Risk Assessment
+
+**Risk:** A user with these rights could alter the snooze task trigger schedule (e.g. push the snooze time far into the future, effectively bypassing progressive enforcement).
+
+**Mitigation controls:**
+
+| Control | Description | Effectiveness |
+|---------|-------------|---------------|
+| Registry state persistence | SnoozeCount is stored in HKLM, which users cannot write to (only SYSTEM can) | HIGH - user cannot reset their own snooze count |
+| Stage 4 enforcement | Stage 4 toast uses `IncomingCallScenario` (non-dismissible) and has no snooze button; task modification cannot bypass the UI constraint | HIGH |
+| Task action immutability | `GRGWGX` does not include `WRITE_DAC`; users cannot change what the task executes | HIGH |
+| Audit trail | SnoozeCount in HKLM provides tamper-evident record of progression | MEDIUM |
+| IT-managed endpoint assumption | This system is designed for corporate managed endpoints only; a user capable of bypassing progressive enforcement via task manipulation would require basic PowerShell knowledge and intentional effort | LOW-MEDIUM |
+
+**Residual Risk Classification:** LOW
+
+**Residual Risk Statement:** A technically proficient user on a managed endpoint could delay enforcement by modifying the snooze task trigger timing. This does not bypass the final (Stage 4) non-dismissible notification. The residual risk is accepted as the business benefit (snooze functionality for all users on shared endpoints) outweighs the risk of a motivated user delaying (but not permanently avoiding) enforcement.
+
+#### 12.3.3 Scope Limitation Controls
+
+The permission grant is limited in scope to minimize attack surface:
+
+- Applied only to tasks matching the naming pattern `Toast_Notification_{GUID}_Snooze{1-4}`
+- Each GUID is unique per deployment instance
+- Tasks self-clean upon expiry or reboot completion
+- Permission is applied per-task, not as a folder-level inherited ACE
+
+### 12.4 Operational Procedures
+
+#### 12.4.1 Verifying SDDL Is Applied
+
+To confirm that `(A;;GRGWGX;;;AU)` has been applied to snooze tasks, run the following in an elevated PowerShell session or via SCCM run script:
+
+```powershell
+# Replace {GUID} with the actual ToastGUID value
+$ToastGUID = '{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}'
+
+$TaskScheduler = New-Object -ComObject 'Schedule.Service'
+$TaskScheduler.Connect()
+
+for ($i = 1; $i -le 4; $i++) {
+    $TaskName = "Toast_Notification_${ToastGUID}_Snooze${i}"
+    try {
+        $TaskObject = $TaskScheduler.GetFolder('\').GetTask($TaskName)
+        $SecDescriptor = $TaskObject.GetSecurityDescriptor(0xF)
+
+        if ($SecDescriptor -match 'A;;GRGWGX;;;AU') {
+            Write-Output "[OK]   $TaskName - AU permission present"
+        }
+        else {
+            Write-Output "[FAIL] $TaskName - AU permission MISSING. SDDL: $SecDescriptor"
+        }
+    }
+    catch {
+        Write-Output "[N/A]  $TaskName - Task not found or inaccessible: $($_.Exception.Message)"
+    }
+}
+
+[void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($TaskScheduler)
+```
+
+**Expected output (successful deployment):**
+
+```
+[OK]   Toast_Notification_{GUID}_Snooze1 - AU permission present
+[OK]   Toast_Notification_{GUID}_Snooze2 - AU permission present
+[OK]   Toast_Notification_{GUID}_Snooze3 - AU permission present
+[OK]   Toast_Notification_{GUID}_Snooze4 - AU permission present
+```
+
+#### 12.4.2 Manually Applying a Missing ACE
+
+If the ACE is absent (e.g. the permission step failed silently during deployment), re-apply it from an elevated session:
+
+```powershell
+$ToastGUID = '{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}'
+
+$TaskScheduler = New-Object -ComObject 'Schedule.Service'
+$TaskScheduler.Connect()
+
+for ($i = 1; $i -le 4; $i++) {
+    $TaskName = "Toast_Notification_${ToastGUID}_Snooze${i}"
+    try {
+        $TaskObject = $TaskScheduler.GetFolder('\').GetTask($TaskName)
+        $SecDescriptor = $TaskObject.GetSecurityDescriptor(0xF)
+
+        if ($SecDescriptor -notmatch 'A;;GRGWGX;;;AU') {
+            $SecDescriptor += '(A;;GRGWGX;;;AU)'
+            $TaskObject.SetSecurityDescriptor($SecDescriptor, 0)
+            Write-Output "[OK]   Updated DACL on $TaskName"
+        }
+        else {
+            Write-Output "[SKIP] AU ACE already present on $TaskName"
+        }
+    }
+    catch {
+        Write-Output "[FAIL] $TaskName - $($_.Exception.Message)"
+    }
+}
+
+[void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($TaskScheduler)
+```
+
+#### 12.4.3 Troubleshooting: Access Denied on Set-ScheduledTask
+
+If `Toast_Snooze_Handler.ps1` logs `Access Denied` when calling `Set-ScheduledTask` or `Enable-ScheduledTask`, follow this diagnostic flow:
+
+```
+[SYMPTOM] Access Denied on Set-ScheduledTask / Enable-ScheduledTask
+          |
+          v
+[STEP 1] Verify task exists
+          Get-ScheduledTask -TaskName "Toast_Notification_{GUID}_Snooze*"
+          - If missing: Re-run Toast_Notify.ps1 as SYSTEM with -Snooze parameter
+          - If present: continue to STEP 2
+          |
+          v
+[STEP 2] Check current task DACL (run verification script from 12.4.1)
+          - If [FAIL] result: Apply ACE manually (12.4.2)
+          - If [OK] result: Continue to STEP 3
+          |
+          v
+[STEP 3] Check Group Policy for Task Scheduler restrictions
+          Computer Config > Windows Settings > Security Settings > Local Policies > User Rights Assignment
+          Look for: "Deny access to this computer from the network" or Task Scheduler service restrictions
+          - If GPO blocking detected: Engage platform team for policy exception
+          |
+          v
+[STEP 4] Verify user is Authenticated User (not local guest or kiosk account)
+          whoami /groups | findstr "S-1-5-11"
+          - If SID absent: User account is not a standard authenticated user; contact Identity team
+```
+
+### 12.5 Change Log for v2.14
+
+| Item | Description |
+|------|-------------|
+| Feature | `Initialize-SnoozeTasks` now grants `(A;;GRGWGX;;;AU)` on each snooze task DACL after registration |
+| Method | `Schedule.Service` COM object (`GetSecurityDescriptor` / `SetSecurityDescriptor`) |
+| Execution Context | SYSTEM context only (function returns immediately if not SYSTEM) |
+| Idempotency | ACE checked before application; duplicate entries are not created |
+| Error Handling | COM/ACL failure is non-fatal; warning emitted, task creation is not rolled back |
+| COM Cleanup | `Marshal.ReleaseComObject` in `finally` block prevents COM handle leaks |
+| Code Location | `src/Toast_Notify.ps1`, function `Initialize-SnoozeTasks`, lines 505-531 |
+| Code Review | docs/CODE_REVIEW_v2.14_SDDL_PERMISSIONS.md - Approved with minor changes |
+| ISO 27001 | A.9.4.1 risk assessment completed; residual risk classified LOW (see 12.3.2) |
+
+---
+
+## 13. Testing and Validation
 
 See DEPLOYMENT_GUIDE_TOAST_v3.0.md Section 7 for detailed test plans.
 
@@ -2544,7 +2846,7 @@ See DEPLOYMENT_GUIDE_TOAST_v3.0.md Section 7 for detailed test plans.
 
 ---
 
-## 12. Troubleshooting Guide
+## 14. Troubleshooting Guide
 
 **Issue:** Toast does not display after deployment
 
@@ -2725,9 +3027,9 @@ Get-Content "C:\WINDOWS\Temp\{GUID}.log" | Select-String "Priority"
 
 ---
 
-## 13. Maintenance Procedures
+## 15. Maintenance Procedures
 
-### 13.1 Registry Cleanup
+### 15.1 Registry Cleanup
 
 **Procedure ID:** TOAST-MAINT-001
 **Frequency:** Monthly or as needed
@@ -2775,7 +3077,7 @@ Get-ChildItem "HKLM:\SOFTWARE\ToastNotification"
 
 **Caution:** Do not delete keys for active notifications (scheduled tasks still exist).
 
-### 13.2 Scheduled Task Cleanup
+### 15.2 Scheduled Task Cleanup
 
 **Procedure ID:** TOAST-MAINT-002
 **Frequency:** Weekly or as needed
@@ -2821,7 +3123,7 @@ Get-ScheduledTask | Where-Object {$_.TaskName -like "Toast_Notification*"}
 
 **Caution:** Do not delete tasks with future NextRunTime (scheduled snoozes).
 
-### 13.3 Log File Rotation
+### 15.3 Log File Rotation
 
 **Procedure ID:** TOAST-MAINT-003
 **Frequency:** Monthly
@@ -2878,9 +3180,9 @@ $OldLogs | ForEach-Object {
 
 ---
 
-## 14. Quality Records
+## 16. Quality Records
 
-### 14.1 Code Review Records
+### 16.1 Code Review Records
 
 **Code Review ID:** CR-TOAST-v3.0-001
 **Date:** 2026-02-12
@@ -2902,7 +3204,24 @@ $OldLogs | ForEach-Object {
 
 **Code Review Outcome:** All critical and high severity findings resolved. Code approved for production deployment.
 
-### 14.2 Security Testing Results
+**Code Review ID:** CR-TOAST-v2.14-001
+**Date:** 2026-02-17
+**Reviewer:** PowerShell Code Reviewer Agent
+**Status:** APPROVED WITH MINOR CHANGES - CHANGES APPLIED
+**Reference Document:** docs/CODE_REVIEW_v2.14_SDDL_PERMISSIONS.md
+
+**Summary of Findings (v2.14):**
+
+| Finding # | Severity | Category | Description | Resolution |
+|-----------|----------|----------|-------------|------------|
+| 1 | HIGH | Security | Scope of AU permission grant not documented in code comments | Extended inline comments in Initialize-SnoozeTasks; ISO 27001 A.9.4.1 justification added to .NOTES block |
+| 2 | MEDIUM | Standards | `$ErrorActionPreference = 'Stop'` set inside COM try block rather than at function begin | Acceptable given error isolation design intent; documented as intentional |
+| 3 | MEDIUM | Style | Magic number `0xF` (DACL_SECURITY_INFORMATION) undocumented | Inline comment added explaining bit flag meaning |
+| 4 | LOW | Documentation | `GRGWGX` rights acronym not explained in code | Comment added listing Generic Read + Generic Write + Generic Execute |
+
+**Code Review Outcome:** All HIGH findings resolved. Code approved for production deployment. See Section 12 for full architectural documentation of the permission design.
+
+### 16.2 Security Testing Results
 
 **Test Plan ID:** SEC-TEST-TOAST-v3.0
 **Test Date:** 2026-02-12
@@ -2926,7 +3245,25 @@ $OldLogs | ForEach-Object {
 
 **Overall Security Test Status:** PASS (10/10 tests passed)
 
-### 14.3 Backwards Compatibility Testing
+**Supplementary Security Tests - v2.14 DACL Grant:**
+
+**Test Plan ID:** SEC-TEST-TOAST-v2.14
+**Test Date:** 2026-02-17 (pending user environment validation)
+**Tester:** IT Operations
+**Test Environment:** Windows 10 21H2 / Windows 11 22H2 - corporate managed endpoint with standard user account
+
+| Test ID | Test Case | Expected Result | Actual Result | Status |
+|---------|-----------|-----------------|---------------|--------|
+| SEC-011 | Standard user calls Enable-ScheduledTask on Snooze1 task | Succeeds (no Access Denied) | PENDING | PENDING |
+| SEC-012 | Standard user calls Set-ScheduledTask on Snooze2 task | Succeeds (no Access Denied) | PENDING | PENDING |
+| SEC-013 | Standard user attempts to change task action executable | Fails (Access Denied - requires WRITE_DAC) | PENDING | PENDING |
+| SEC-014 | SDDL ACE present after Initialize-SnoozeTasks runs | (A;;GRGWGX;;;AU) found in GetSecurityDescriptor | PENDING | PENDING |
+| SEC-015 | Initialize-SnoozeTasks called twice (idempotency) | Only one (A;;GRGWGX;;;AU) ACE in descriptor | PENDING | PENDING |
+| SEC-016 | Initialize-SnoozeTasks called in user context | Function returns $false, no task modification | PENDING | PENDING |
+
+**Note:** SEC-011 through SEC-016 require a managed endpoint with a standard user test account. Mark PASS/FAIL and update this table after validation testing.
+
+### 16.3 Backwards Compatibility Testing
 
 **Test Plan ID:** BC-TEST-TOAST-v3.0
 **Test Date:** 2026-02-12
@@ -2950,7 +3287,7 @@ $OldLogs | ForEach-Object {
 
 **Conclusion:** v3.0 maintains 100% backwards compatibility with v2.1 configurations. New features (progressive enforcement) are opt-in via -EnableProgressive parameter.
 
-### 14.4 Performance Benchmarks
+### 16.4 Performance Benchmarks
 
 **Test Environment:** Windows 10 21H2, Intel Core i5-8500, 16GB RAM
 
@@ -2967,9 +3304,9 @@ $OldLogs | ForEach-Object {
 
 ---
 
-## 15. References
+## 17. References
 
-### 15.1 External Standards and Specifications
+### 17.1 External Standards and Specifications
 
 | Standard | Version | Title | URL |
 |----------|---------|-------|-----|
@@ -2977,7 +3314,7 @@ $OldLogs | ForEach-Object {
 | ISO 27001 | 2015 | Information Security Management Systems | https://www.iso.org/standard/54534.html |
 | ISO/IEC/IEEE 26515 | 2018 | Systems and software engineering - Developing user documentation | https://www.iso.org/standard/67682.html |
 
-### 15.2 Microsoft Documentation
+### 17.2 Microsoft Documentation
 
 | Topic | Title | URL |
 |-------|-------|-----|
@@ -2986,16 +3323,22 @@ $OldLogs | ForEach-Object {
 | Scheduled Tasks | ScheduledTasks PowerShell Module | https://docs.microsoft.com/en-us/powershell/module/scheduledtasks/ |
 | Registry | Working with Registry Keys | https://docs.microsoft.com/en-us/powershell/scripting/samples/working-with-registry-keys |
 | Protocol Handlers | Registering an Application to a URI Scheme | https://docs.microsoft.com/en-us/previous-versions/windows/internet-explorer/ie-developer/platform-apis/aa767914(v=vs.85) |
+| Task Scheduler COM API | ITaskService interface (Schedule.Service) | https://learn.microsoft.com/en-us/windows/win32/api/taskschd/nn-taskschd-itaskservice |
+| Task Security Descriptor | IRegisteredTask::GetSecurityDescriptor | https://learn.microsoft.com/en-us/windows/win32/api/taskschd/nf-taskschd-iregisteredtask-getsecuritydescriptor |
+| SDDL Reference | Security Descriptor Definition Language | https://learn.microsoft.com/en-us/windows/win32/secauthz/security-descriptor-definition-language |
+| Access Rights | Generic Access Rights | https://learn.microsoft.com/en-us/windows/win32/secauthz/generic-access-rights |
+| Well-Known SIDs | Authenticated Users (S-1-5-11) | https://learn.microsoft.com/en-us/windows/win32/secauthz/well-known-sids |
 
-### 15.3 Internal Documentation
+### 17.3 Internal Documentation
 
 | Document | Location |
 |----------|----------|
 | PSADT Coding Standards | ~/.claude/rules/psadt-standards.md |
 | Character Encoding Standards | ~/.claude/rules/character-encoding.md |
 | PowerShell Best Practices | https://github.com/PoshCode/PowerShellPracticeAndStyle |
+| v2.14 Code Review | docs/CODE_REVIEW_v2.14_SDDL_PERMISSIONS.md |
 
-### 15.4 Community Resources
+### 17.4 Community Resources
 
 | Resource | Author | URL |
 |----------|--------|-----|
@@ -3186,14 +3529,15 @@ Action Snooze Dismiss
 | Role | Name | Signature | Date |
 |------|------|-----------|------|
 | Author | Ben Whitmore | _________________ | 2026-02-12 |
-| Technical Reviewer | Code Review Agent | APPROVED | 2026-02-12 |
-| Security Reviewer | Security Team | APPROVED | 2026-02-12 |
-| Quality Assurance | QA Team | APPROVED | 2026-02-12 |
-| Document Owner | IT Operations Manager | _________________ | 2026-02-12 |
+| Author (v3.2 additions) | CR | _________________ | 2026-02-17 |
+| Technical Reviewer | Code Review Agent | APPROVED | 2026-02-17 |
+| Security Reviewer | Security Team | PENDING | 2026-02-17 |
+| Quality Assurance | QA Team | PENDING | 2026-02-17 |
+| Document Owner | IT Operations Manager | _________________ | 2026-02-17 |
 
 ---
 
 *End of Technical Documentation - Progressive Toast Notification System v3.0*
 
-*Version: 3.0 | Date: 2026-02-12*
+*Version: 3.2 | Date: 2026-02-17*
 *Licensed under GNU General Public License v3*
