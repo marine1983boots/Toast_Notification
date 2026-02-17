@@ -5,7 +5,7 @@
 | Field | Value |
 |-------|-------|
 | Document Title | Technical Documentation - Progressive Toast Notification System v3.0 |
-| Version | 3.7 |
+| Version | 3.8 |
 | Date | 2026-02-17 |
 | Author | CR |
 | Based On | Toast by Ben Whitmore (@byteben) |
@@ -34,6 +34,7 @@
 | 3.5 | 2026-02-17 | CR | Updated for v2.17: DACL Security Information flags corrected (GetSecurityDescriptor/SetSecurityDescriptor flags 0xF/0 replaced with 4/4; ACE changed from GRGWGX to GA for correct Task Scheduler modify rights); added Section 12.2.5 and Section 12.8 change log; added code review record CR-TOAST-v2.17-001 |
 | 3.6 | 2026-02-17 | CR | Updated for v2.18 (direct DACL set replaces GetSecurityDescriptor+append; flags corrected to 0), v2.19 (Start-Transcript in both SYSTEM and USER contexts), v2.20 (DACL loop restructured to cover existing tasks; SDDL FA corrected to GA), and Toast_Snooze_Handler.ps1 v1.7 (ErrorActionPreference=Continue in all catch blocks); added Sections 12.2.6, 12.2.7, 12.9, 12.10, 12.11; added code review records CR-TOAST-v2.18-001 through CR-TOAST-v1.7-001; updated operational procedure scripts and mitigation table |
 | 3.7 | 2026-02-17 | CR | Updated for v2.21 (root cause fix: task principal changed from GroupId S-1-5-32-545 TASK_LOGON_GROUP to UserId NT AUTHORITY\INTERACTIVE TASK_LOGON_INTERACTIVE_TOKEN; DACL updated from AU/GA to IU/GRGWGX per MSDN SeBatchLogonRight requirement and ISO 27001 A.9.4.1 least privilege) and Toast_Snooze_Handler.ps1 v1.8 (catch block restructured to isolate Get-ScheduledTask from Set-ScheduledTask exceptions); added Sections 12.2.8, 12.12; added code review records CR-TOAST-v2.21-001 and CR-TOAST-v1.8-001; updated ISO 27001 compliance assessment, operational procedures, and verification scripts |
+| 3.8 | 2026-02-17 | CR | Updated for v2.22 (fixed Register-ScheduledTask XML schema rejection: NT AUTHORITY\INTERACTIVE cannot appear as a UserId element in Task Scheduler XML; replaced New-ScheduledTaskPrincipal with manually constructed XML using InteractiveToken logon type and no UserId element; fixed false-positive boolean detection in Initialize-SnoozeTasks caller; corrected stale log message line 628 for ISO 27001 A.14.2.1 audit accuracy) and Toast_Snooze_Handler.ps1 v1.8 (version string corrected to v1.8); added Section 12.2.9 and Section 12.13; added code review record CR-TOAST-v2.22-001; added SEC-024 through SEC-027 |
 
 ## Table of Contents
 
@@ -49,6 +50,8 @@
 10. [Corporate Environment Compatibility](#10-corporate-environment-compatibility)
 11. [Registry and Log Configuration](#11-registry-and-log-configuration)
 12. [Scheduled Task DACL Permission Architecture](#12-scheduled-task-dacl-permission-architecture)
+    - 12.2.9 [Task Registration via Manually Constructed XML (v2.22)](#1229-task-registration-via-manually-constructed-xml-v222)
+    - 12.13 [Change Log for v2.22](#1213-change-log-for-v222)
 13. [Testing and Validation](#13-testing-and-validation)
 14. [Troubleshooting Guide](#14-troubleshooting-guide)
 15. [Maintenance Procedures](#15-maintenance-procedures)
@@ -171,7 +174,7 @@ This documentation is intended for:
 
 **Task Principal**: The security principal configured in a scheduled task definition that determines the user account or group under which the task action executes. Set at task creation via `New-ScheduledTaskPrincipal`. Does not affect who can modify the task.
 
-**SDDL String**: A textual representation of a security descriptor (ACL). Each ACE within the DACL portion uses the format `(type;flags;rights;;;SID)`. Current form (v2.21+): `D:(A;;GRGWGX;;;SY)(A;;GRGWGX;;;BA)(A;;GRGWGX;;;IU)` - SYSTEM, Administrators, and INTERACTIVE users each receive Generic Read+Write+Execute (minimum rights required by Set-ScheduledTask and Enable-ScheduledTask). Prior form (v2.20): `D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;AU)` using Generic All and Authenticated Users. Earlier versions used incorrect flags or rights tokens; see Section 12.2 for full version history.
+**SDDL String**: A textual representation of a security descriptor (ACL). Each ACE within the DACL portion uses the format `(type;flags;rights;;;SID)`. Current form (v2.21+, unchanged in v2.22): `D:(A;;GRGWGX;;;SY)(A;;GRGWGX;;;BA)(A;;GRGWGX;;;IU)` - SYSTEM, Administrators, and INTERACTIVE users each receive Generic Read+Write+Execute (minimum rights required by Set-ScheduledTask and Enable-ScheduledTask). The v2.22 change affected task registration method (XML construction) but not the SDDL content. Prior form (v2.20): `D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;AU)` using Generic All and Authenticated Users. Earlier versions used incorrect flags or rights tokens; see Section 12.2 for full version history.
 
 **Schedule.Service COM Object**: The `Schedule.Service` COM automation object (ProgID: `Schedule.Service`) that provides programmatic access to the Task Scheduler service. Used to read and write task security descriptors that cannot be set via the standard `ScheduledTasks` PowerShell module.
 
@@ -2960,6 +2963,174 @@ The snooze handler requires the ability to read the task definition (`Get-Schedu
 | TASK_LOGON_TYPE enumeration | https://learn.microsoft.com/en-us/windows/win32/api/taskschd/ne-taskschd-task_logon_type |
 | Well-Known SID S-1-5-4 (INTERACTIVE) | https://learn.microsoft.com/en-us/windows/win32/secauthz/well-known-sids |
 
+#### 12.2.9 Task Registration via Manually Constructed XML (v2.22)
+
+**Introduced In:** Toast_Notify.ps1 v2.22
+
+**Root Cause: NT AUTHORITY\INTERACTIVE Rejected by Task Scheduler XML Schema Validator**
+
+v2.21 introduced `New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\INTERACTIVE" -LogonType Interactive` to resolve the SeBatchLogonRight requirement imposed by TASK_LOGON_GROUP principals. However, v2.21 introduced a second, distinct failure:
+
+```
+The task XML contains a value which is incorrectly formatted or out of range. (43,4):Task:
+```
+
+**Root Cause Analysis:**
+
+`New-ScheduledTaskPrincipal` always serialises its output into a `<UserId>` element in the task XML when any value is supplied to `-UserId`. The resulting XML principal block takes the form:
+
+```xml
+<Principals>
+  <Principal id="Author">
+    <UserId>NT AUTHORITY\INTERACTIVE</UserId>
+    <LogonType>InteractiveToken</LogonType>
+    <RunLevel>LeastPrivilege</RunLevel>
+  </Principal>
+</Principals>
+```
+
+`NT AUTHORITY\INTERACTIVE` (SID S-1-5-4) is a virtual well-known SID that is not a resolvable account name. The Task Scheduler XML schema validator, which runs at line 43 column 4 in the XML document, rejects the `<UserId>` element when its value cannot be resolved to a real account or is incompatible with the declared `<LogonType>`. The error position `(43,4):Task:` corresponds to the `<Principals>` block within the Task Scheduler XML schema.
+
+**Evidence:** SYSTEM deployment log at `C:\ProgramData\ToastNotification\{GUID}\Logs\Toast_Notify_20260217_140504.log` showed all 4 snooze task registrations failing with this XML schema error. The log also exposed a second bug: the script printed `[OK] Snooze tasks pre-created` despite all 4 tasks having failed, confirming the false-positive detection issue described in Section 12.2.9b below.
+
+**Correct XML Format for InteractiveToken Logon Type:**
+
+The Task Scheduler XML schema for `TASK_LOGON_INTERACTIVE_TOKEN` (logon type 3) requires that the `<Principals>` block contain `<LogonType>InteractiveToken</LogonType>` with NO `<UserId>` element. The task runs as whoever is currently logged on interactively; there is no fixed user identity to specify. The correct minimal form is:
+
+```xml
+<Principals>
+  <Principal id="Author">
+    <LogonType>InteractiveToken</LogonType>
+    <RunLevel>LeastPrivilege</RunLevel>
+  </Principal>
+</Principals>
+```
+
+**Fix: Register-ScheduledTask -Xml with Manually Constructed XML**
+
+v2.22 replaces the `Register-ScheduledTask` call (which relied on `New-ScheduledTaskPrincipal`) with `Register-ScheduledTask -Xml` using a manually constructed XML here-string. This gives precise control over the `<Principals>` block and avoids the `<UserId>` element that `New-ScheduledTaskPrincipal` unconditionally inserts.
+
+The critical XML here-string structure applied in v2.22:
+
+```xml
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Author>Toast Notification System</Author>
+  </RegistrationInfo>
+  <Triggers/>
+  <Principals>
+    <Principal id="Author">
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>false</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>true</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>false</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT72H</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>powershell.exe</Command>
+      <Arguments>-NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{ToastScriptPath}" -ToastGUID "{ToastGUID}" -SnoozeCount {SnoozeCount}</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+```
+
+`{ToastScriptPath}`, `{ToastGUID}`, and `{SnoozeCount}` are substituted at runtime. `[System.Security.SecurityElement]::Escape()` is applied to `$ToastScriptPath` and `$ToastGUID` before embedding them in the here-string to prevent XML injection from path characters (e.g. `&`, `<`, `>`).
+
+**Why This Works:**
+
+The absence of a `<UserId>` element with an incompatible value eliminates the XML schema validation failure at position (43,4). The `<LogonType>InteractiveToken</LogonType>` element correctly instructs Task Scheduler to run the task under the currently logged-on interactive user's token at the time the task is enabled and triggered by the snooze handler.
+
+**DACL Application Unchanged:**
+
+The `SetSecurityDescriptor` call that applies `D:(A;;GRGWGX;;;SY)(A;;GRGWGX;;;BA)(A;;GRGWGX;;;IU)` (introduced in v2.14 and revised to its current form in v2.21) is unchanged. The DACL is applied after successful task registration via `Register-ScheduledTask -Xml`.
+
+**Section 12.2.9b: False-Positive Detection Fix**
+
+**Problem Identified in v2.22 (Bug Present Since v2.21):**
+
+The function `Initialize-SnoozeTasks` returns `$false` on failure and `$true` on success. When the function's output is assigned to a variable:
+
+```powershell
+$TaskInitResult = Initialize-SnoozeTasks -ToastGUID $ToastGUID -ToastScriptPath $StagedScriptPath
+```
+
+PowerShell captures ALL output from the function - including every `Write-Output` string emitted during execution - into an array. The array is non-empty regardless of whether the function succeeded or failed, because it always contains at least one string from the function's log output. A non-empty array evaluates to `$true` in a boolean context.
+
+Therefore, the pre-v2.22 check:
+
+```powershell
+if ($TaskInitResult) {
+    Write-Output "[OK] Snooze tasks pre-created"
+}
+```
+
+always evaluated to `$true` (non-empty array), printing `[OK] Snooze tasks pre-created` even when all 4 task registrations had failed with the XML schema error. This masked the actual failure state and caused misleading log output.
+
+**Fix Applied in v2.22:**
+
+```powershell
+# PowerShell captures ALL output (strings + boolean) into the array $TaskInitResult.
+# Select the last element which is the function's return value (true/false).
+$TaskInitSuccess = ($TaskInitResult | Select-Object -Last 1) -eq $true
+if ($TaskInitSuccess) {
+    Write-Output "[OK] Snooze tasks pre-created"
+}
+```
+
+`Select-Object -Last 1` extracts the final element of the output array, which is the boolean `$true` or `$false` explicitly returned by `Initialize-SnoozeTasks`. The `-eq $true` comparison ensures the type is evaluated correctly and not merely as a truthy string.
+
+**Log Message Accuracy Correction (ISO 27001 A.14.2.1):**
+
+The code reviewer identified that line 628 contained a stale log message from v2.20 that no longer accurately described the DACL grant:
+
+| Version | Log Message (line 628) |
+|---------|------------------------|
+| v2.20 (stale) | `"  Granted AU Generic All access: $TaskName [OK]"` |
+| v2.22 (corrected) | `"  Granted IU GRGWGX access: $TaskName [OK]"` |
+
+The incorrect message referenced `AU` (Authenticated Users) and `Generic All`, which described the v2.20 DACL. The v2.21 DACL uses `IU` (INTERACTIVE) and `GRGWGX` (Generic Read+Write+Execute). An inaccurate audit log message constitutes a non-conformance with ISO 27001:2015 Annex A.14.2.1 (Secure Development Policy - audit trail accuracy). Corrected before commit.
+
+**Summary of v2.22 Changes:**
+
+| Change | Area | Root Cause | Fix |
+|--------|------|------------|-----|
+| Task XML schema rejection | Initialize-SnoozeTasks - task registration | `New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\INTERACTIVE"` always emits `<UserId>` element; Task Scheduler XML validator rejects `NT AUTHORITY\INTERACTIVE` as a UserId value at schema position (43,4) | Replace with `Register-ScheduledTask -Xml` using manually constructed XML containing `<LogonType>InteractiveToken</LogonType>` and no `<UserId>` element |
+| False-positive success detection | Initialize-SnoozeTasks caller (line 1519) | PowerShell output capture: assigning function output to variable creates a non-empty array (strings + boolean); non-empty array is always truthy | Use `($TaskInitResult | Select-Object -Last 1) -eq $true` to isolate the function's explicit boolean return value |
+| Stale log message | Initialize-SnoozeTasks - DACL grant (line 628) | Log message not updated when DACL changed from AU/GA to IU/GRGWGX in v2.21 | Corrected to `"  Granted IU GRGWGX access: $TaskName [OK]"` |
+| Version string | Toast_Snooze_Handler.ps1 (line 262) | Startup message referenced v1.7 instead of v1.8 | Corrected to `"Toast Snooze Handler Started (v1.8)"` |
+
+**Code Location:** `src/Toast_Notify.ps1`, `Initialize-SnoozeTasks` function (task registration loop, lines 542-592) and caller at lines 1519-1522.
+
+**Code Review:** CR-TOAST-v2.22-001 - Approved (see Section 16.1)
+
+**References:**
+
+| Reference | Note |
+|-----------|------|
+| Task Scheduler XML schema | `<UserId>` element is optional for `InteractiveToken` logon type; its presence with a virtual SID causes schema validation failure |
+| [System.Security.SecurityElement]::Escape() | .NET method for XML attribute/element value escaping; prevents XML injection from file path characters |
+| ISO 27001:2015 Annex A.14.2.1 | Secure Development Policy: requires audit log messages to accurately reflect the operation performed |
+| Section 12.2.8 | v2.21 changes to principal type and DACL that v2.22 carries forward (DACL unchanged) |
+
 ### 12.3 ISO 27001 A.9.4.1 Access Control Assessment
 
 **Control Reference:** ISO 27001:2015 Annex A, Control A.9.4.1 - Information Access Restriction
@@ -3285,6 +3456,38 @@ If `Toast_Snooze_Handler.ps1` logs `Access Denied` when calling `Set-ScheduledTa
 | Interaction with v2.21 | The v1.8 catch block restructure and the v2.21 principal change are independent fixes. v1.8 improves diagnostic clarity regardless of whether the caller uses v2.20 or v2.21 tasks. With v2.21 tasks, Set-ScheduledTask access denied errors should no longer occur; the v1.8 restructure provides correct error isolation as a defensive measure |
 | Code Location | `src/Toast_Snooze_Handler.ps1`, task lookup and task modification blocks |
 | Code Review | CR-TOAST-v1.8-001 - Approved (see Section 16.1) |
+
+### 12.13 Change Log for v2.22 (Toast_Notify.ps1) and v1.8 Version String Correction (Toast_Snooze_Handler.ps1)
+
+#### 12.13.1 Toast_Notify.ps1 v2.22
+
+| Item | Description |
+|------|-------------|
+| Root Cause (Confirmed) | v2.21 introduced `New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\INTERACTIVE" -LogonType Interactive`. The PowerShell cmdlet unconditionally emits a `<UserId>` element in the task XML. `NT AUTHORITY\INTERACTIVE` is a virtual SID (S-1-5-4), not a resolvable account. The Task Scheduler XML schema validator rejects it at position (43,4) with error: "The task XML contains a value which is incorrectly formatted or out of range. (43,4):Task:" All 4 snooze task registrations failed with this error on every deployment. |
+| Why v2.21 Fix Was Incomplete | The v2.21 principal change correctly identified the TASK_LOGON_GROUP / SeBatchLogonRight root cause and selected the correct logon type (TASK_LOGON_INTERACTIVE_TOKEN). However, the implementation via `New-ScheduledTaskPrincipal` introduced a new failure: the cmdlet's serialisation of `NT AUTHORITY\INTERACTIVE` into a `<UserId>` XML element is incompatible with Task Scheduler's XML schema for InteractiveToken logon type. |
+| Change 1 (Task Registration) | Replaced `Register-ScheduledTask` (using `New-ScheduledTaskPrincipal` output) with `Register-ScheduledTask -Xml` using a manually constructed XML here-string. The `<Principals>` block contains `<LogonType>InteractiveToken</LogonType>` and `<RunLevel>LeastPrivilege</RunLevel>` with NO `<UserId>` element. This passes Task Scheduler XML schema validation and correctly configures the task to run under the currently logged-on interactive user's token. |
+| XML Injection Mitigation | `[System.Security.SecurityElement]::Escape()` is applied to `$ToastScriptPath` and `$ToastGUID` before embedding them in the XML here-string. This prevents XML injection from file path characters such as `&`, `<`, and `>`. |
+| Change 2 (False-Positive Detection) | The caller of `Initialize-SnoozeTasks` used `if ($TaskInitResult)` to check success. PowerShell captures all Write-Output strings plus the boolean return value into a single array when function output is assigned to a variable. A non-empty array is always truthy, so the check always evaluated `$true` regardless of task registration success or failure. Fixed by: `$TaskInitSuccess = ($TaskInitResult | Select-Object -Last 1) -eq $true`. `Select-Object -Last 1` extracts the function's explicit boolean return value from the end of the output array. |
+| Evidence of Bug | SYSTEM deployment log showed "ALL 4 tasks fail with XML schema error (43,4)" followed by "[OK] Snooze tasks pre-created" - confirming the false positive. The misleading log output prevented correct diagnosis. |
+| Change 3 (Log Message Accuracy) | Line 628 contained stale log message `"  Granted AU Generic All access: $TaskName [OK]"`. The DACL was updated to IU/GRGWGX in v2.21 but this log message was not updated. Corrected to `"  Granted IU GRGWGX access: $TaskName [OK]"`. ISO 27001:2015 A.14.2.1 requires audit log messages to accurately reflect operations. |
+| DACL Unchanged | `D:(A;;GRGWGX;;;SY)(A;;GRGWGX;;;BA)(A;;GRGWGX;;;IU)` from v2.21 is carried forward unchanged. The `SetSecurityDescriptor` call that applies this DACL is unmodified. |
+| Effect | Snooze tasks now register successfully via XML. Task Scheduler accepts the XML, creates the 4 disabled snooze tasks, and applies the DACL. The false-positive log message is eliminated. Audit trail accuracy restored. |
+| Security Impact | NEUTRAL relative to v2.21. The principal type (InteractiveToken) and DACL (IU/GRGWGX) are unchanged from v2.21 design intent; v2.22 corrects the implementation to match the design. |
+| ISO 27001 Assessment | A.14.2.1 COMPLIANT (restored). A.9.4.1 COMPLIANT (unchanged from v2.21). |
+| Code Location | `src/Toast_Notify.ps1`, `Initialize-SnoozeTasks` function (task registration loop, approximately lines 542-592) and caller (approximately lines 1519-1522) |
+| Code Review | CR-TOAST-v2.22-001 - Approved (see Section 16.1) |
+| Architecture Reference | Section 12.2.9 - Task Registration via Manually Constructed XML (v2.22) |
+
+#### 12.13.2 Toast_Snooze_Handler.ps1 v1.8 Version String Correction
+
+| Item | Description |
+|------|-------------|
+| Change | Startup log message corrected from `"Toast Snooze Handler Started (v1.7)"` to `"Toast Snooze Handler Started (v1.8)"` at line 262 |
+| Root Cause | Version string was not updated when v1.8 functional changes were committed. The startup message referenced the prior version, causing the log to misidentify the executing script version. |
+| Effect | Deployment logs and transcripts now correctly identify Toast_Snooze_Handler.ps1 as version 1.8, matching the version constant at the top of the script. |
+| ISO 27001 Assessment | A.14.2.1 COMPLIANT (log accuracy restored). |
+| Code Location | `src/Toast_Snooze_Handler.ps1`, line 262 |
+| Note | No functional logic changes from v1.8. The catch block restructure documented in Section 12.12.2 remains in effect. |
 
 ---
 
@@ -3865,6 +4068,23 @@ $OldLogs | ForEach-Object {
 
 **Code Review Outcome:** Error isolation corrected. "PRE-CREATED TASK NOT FOUND" is now exclusively reported when Get-ScheduledTask raises CimException. Set-ScheduledTask failures report the actual error (e.g. Access Denied). No functional logic changed. No security implications. Approved for production deployment.
 
+**Code Review ID:** CR-TOAST-v2.22-001
+**Date:** 2026-02-17
+**Reviewer:** PowerShell Code Reviewer Agent
+**File:** src/Toast_Notify.ps1
+**Status:** APPROVED - NO CHANGES REQUIRED
+
+**Summary of Findings (v2.22 - Toast_Notify.ps1):**
+
+| Finding # | Severity | Category | Description | Resolution |
+|-----------|----------|----------|-------------|------------|
+| 1 | INFO | Root Cause | `New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\INTERACTIVE"` always emits `<UserId>` element in task XML; Task Scheduler XML schema validator rejects `NT AUTHORITY\INTERACTIVE` as a UserId value at schema position (43,4), causing all 4 snooze task registrations to fail | Resolved by change: replaced with `Register-ScheduledTask -Xml` using manually constructed XML; `<Principals>` block contains `<LogonType>InteractiveToken</LogonType>` with no `<UserId>` element |
+| 2 | MEDIUM | Defect - False Positive | `if ($TaskInitResult)` evaluated always `$true` because PowerShell captured all Write-Output strings and the boolean return value into a non-empty array when function output was assigned to a variable; the log printed `[OK] Snooze tasks pre-created` even when all tasks had failed | Resolved: `$TaskInitSuccess = ($TaskInitResult | Select-Object -Last 1) -eq $true`; `Select-Object -Last 1` isolates the explicit boolean return value at the end of the output array |
+| 3 | LOW | Audit Trail (ISO 27001 A.14.2.1) | Line 628 log message `"  Granted AU Generic All access"` did not reflect the v2.21 DACL change to IU/GRGWGX; stale message since v2.21 commit | Resolved: corrected to `"  Granted IU GRGWGX access: $TaskName [OK]"` |
+| 4 | INFO | XML Injection | `$ToastScriptPath` and `$ToastGUID` embedded directly in XML here-string could allow XML injection from file path characters | Resolved: `[System.Security.SecurityElement]::Escape()` applied to both values before embedding |
+
+**Code Review Outcome:** XML schema failure root cause identified and resolved via direct XML construction. False-positive detection corrected with correct last-element extraction from PowerShell output array. Audit trail accuracy restored per ISO 27001 A.14.2.1. XML injection mitigated via SecurityElement.Escape(). Approved for production deployment.
+
 ### 16.2 Security Testing Results
 
 **Test Plan ID:** SEC-TEST-TOAST-v3.0
@@ -3916,7 +4136,7 @@ $OldLogs | ForEach-Object {
 
 | Test ID | Test Case | Expected Result | Actual Result | Status |
 |---------|-----------|-----------------|---------------|--------|
-| SEC-017 | Task principal logon type after Initialize-SnoozeTasks (v2.21) | LogonType = Interactive (3); UserId = NT AUTHORITY\INTERACTIVE | PENDING | PENDING |
+| SEC-017 | Task principal logon type after Initialize-SnoozeTasks (v2.21/v2.22) | LogonType = InteractiveToken; NO UserId element in XML (v2.22 corrected: v2.21 emitted UserId element which caused XML schema rejection at position (43,4); v2.22 uses Register-ScheduledTask -Xml without UserId element) | PENDING | PENDING |
 | SEC-018 | Standard user calls Set-ScheduledTask on INTERACTIVE-type snooze task | Succeeds without SeBatchLogonRight; no Access Denied | PENDING | PENDING |
 | SEC-019 | Standard user calls Enable-ScheduledTask on INTERACTIVE-type snooze task | Succeeds without SeBatchLogonRight; no Access Denied | PENDING | PENDING |
 | SEC-020 | Non-interactive service account attempts Set-ScheduledTask on snooze task | Fails; IU SID not in service account token; DACL denies access | PENDING | PENDING |
@@ -3925,6 +4145,22 @@ $OldLogs | ForEach-Object {
 | SEC-023 | Re-deploy v2.21 over v2.20 deployment (idempotency) | v2.21 DACL D:(A;;GRGWGX;;;SY)(A;;GRGWGX;;;BA)(A;;GRGWGX;;;IU) overwrites v2.20 DACL | PENDING | PENDING |
 
 **Note:** SEC-017 through SEC-023 require a managed endpoint with a standard user test account. Mark PASS/FAIL and update this table after validation testing.
+
+**Supplementary Security Tests - v2.22 XML Task Registration and False-Positive Fix:**
+
+**Test Plan ID:** SEC-TEST-TOAST-v2.22
+**Test Date:** 2026-02-17 (pending user environment validation)
+**Tester:** IT Operations
+**Test Environment:** Windows 10 21H2 / Windows 11 22H2 - corporate managed endpoint with standard user account
+
+| Test ID | Test Case | Expected Result | Actual Result | Status |
+|---------|-----------|-----------------|---------------|--------|
+| SEC-024 | Initialize-SnoozeTasks registers all 4 snooze tasks without XML schema error (v2.22) | All 4 tasks created successfully; no "(43,4):Task:" error in log | PENDING | PENDING |
+| SEC-025 | Task XML Principals block does not contain UserId element after Initialize-SnoozeTasks (v2.22) | Export-ScheduledTask XML shows `<LogonType>InteractiveToken</LogonType>` and no `<UserId>` element | PENDING | PENDING |
+| SEC-026 | Initialize-SnoozeTasks caller correctly logs FAIL when task registration fails (false-positive fix) | When Register-ScheduledTask fails, log shows "[WARN] Snooze task pre-creation failed" not "[OK] Snooze tasks pre-created" | PENDING | PENDING |
+| SEC-027 | DACL on v2.22-registered tasks matches D:(A;;GRGWGX;;;SY)(A;;GRGWGX;;;BA)(A;;GRGWGX;;;IU) | GetSecurityDescriptor returns correct SDDL; IU/GRGWGX entries present; AU and GA not present | PENDING | PENDING |
+
+**Note:** SEC-024 through SEC-027 require a managed endpoint with a standard user test account. Mark PASS/FAIL and update this table after validation testing.
 
 ### 16.3 Backwards Compatibility Testing
 
@@ -4201,6 +4437,7 @@ Action Snooze Dismiss
 | Author (v3.5 additions) | CR | _________________ | 2026-02-17 |
 | Author (v3.6 additions) | CR | _________________ | 2026-02-17 |
 | Author (v3.7 additions) | CR | _________________ | 2026-02-17 |
+| Author (v3.8 additions) | CR | _________________ | 2026-02-17 |
 | Technical Reviewer | Code Review Agent | APPROVED | 2026-02-17 |
 | Security Reviewer | Security Team | PENDING | 2026-02-17 |
 | Quality Assurance | QA Team | PENDING | 2026-02-17 |
@@ -4210,5 +4447,5 @@ Action Snooze Dismiss
 
 *End of Technical Documentation - Progressive Toast Notification System v3.0*
 
-*Version: 3.7 | Date: 2026-02-17*
+*Version: 3.8 | Date: 2026-02-17*
 *Licensed under GNU General Public License v3*

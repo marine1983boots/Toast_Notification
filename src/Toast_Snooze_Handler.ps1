@@ -259,7 +259,7 @@ if (!(Test-Path $LogDirectory)) {
 Start-Transcript -Path $LogPath -Append
 
 Write-Output "========================================="
-Write-Output "Toast Snooze Handler Started (v1.7)"
+Write-Output "Toast Snooze Handler Started (v1.8)"
 Write-Output "========================================="
 Write-Output "ProtocolUri: $ProtocolUri"
 Write-Output "ToastGUID: $ToastGUID"

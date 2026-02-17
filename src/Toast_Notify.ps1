@@ -5,6 +5,12 @@ Created by:   Ben Whitmore
 Filename:     Toast_Notify.ps1
 ===========================================================================
 
+Version 2.22 - 17/02/2026
+-FIX: Replaced New-ScheduledTaskPrincipal + Register-ScheduledTask with Register-ScheduledTask -Xml in Initialize-SnoozeTasks
+-ROOT CAUSE: NT AUTHORITY\INTERACTIVE is a virtual SID rejected by Task Scheduler XML schema as <UserId> element
+-SOLUTION: Manually constructed XML with <LogonType>InteractiveToken</LogonType> and NO <UserId> element is valid
+-FIX: Corrected false [OK] message when Initialize-SnoozeTasks fails - now checks last element of result array for boolean
+
 Version 2.21 - 17/02/2026
 -FIX: Changed pre-created snooze task principal from GroupId S-1-5-32-545 to NT AUTHORITY\INTERACTIVE (TASK_LOGON_INTERACTIVE_TOKEN)
 -ROOT CAUSE: GroupId principal requires SeBatchLogonRight per MSDN ITaskFolder::RegisterTaskDefinition. Standard users do not have this right by default.
@@ -533,35 +539,58 @@ function Initialize-SnoozeTasks {
 
         try {
             if (-not $ExistingTask) {
-                # Task does not exist - create it first
-                # Create task action
-                $Task_Action = New-ScheduledTaskAction `
-                    -Execute "C:\WINDOWS\system32\WindowsPowerShell\v1.0\PowerShell.exe" `
-                    -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""$ToastScriptPath"" -ToastGUID ""$ToastGUID"" -Snooze"
-
-                # Create principal using NT AUTHORITY\INTERACTIVE (TASK_LOGON_INTERACTIVE_TOKEN).
-                # INTERACTIVE logon type does NOT require SeBatchLogonRight, which standard users
-                # lack by default. GroupId (TASK_LOGON_GROUP) requires SeBatchLogonRight per MSDN
-                # ITaskFolder::RegisterTaskDefinition, causing E_ACCESS_DENIED on Set-ScheduledTask.
-                $Task_Principal = New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\INTERACTIVE" -LogonType Interactive -RunLevel Limited
-
-                # Create settings (task disabled by default, no trigger)
-                $Task_Settings = New-ScheduledTaskSettingsSet `
-                    -Compatibility Win8 `
-                    -AllowStartIfOnBatteries `
-                    -DontStopIfGoingOnBatteries `
-                    -Disable
-
-                # Create task (no trigger - will be set by snooze handler)
-                $New_Task = New-ScheduledTask `
-                    -Description "Toast Notification - Snooze Stage $i (pre-created, disabled until activated by snooze handler)" `
-                    -Action $Task_Action `
-                    -Principal $Task_Principal `
-                    -Settings $Task_Settings
-
-                # Register task (running as SYSTEM, so this works)
-                Register-ScheduledTask -TaskName $TaskName -InputObject $New_Task -Force -ErrorAction Stop | Out-Null
-                Write-Output "  Pre-created task: $TaskName [DISABLED]"
+                # Task does not exist - create it using raw XML.
+                # New-ScheduledTaskPrincipal always emits a <UserId> element in the task XML.
+                # The Task Scheduler XML schema rejects NT AUTHORITY\INTERACTIVE as a <UserId>
+                # value because it is a virtual SID (not a resolvable account), producing:
+                #   "The task XML contains a value which is incorrectly formatted or out of range. (43,4):Task:"
+                # Register-ScheduledTask -Xml bypasses New-ScheduledTaskPrincipal entirely,
+                # allowing us to emit <LogonType>InteractiveToken</LogonType> with NO <UserId>
+                # element. This produces a valid InteractiveToken task that runs as whoever is
+                # logged in interactively, and standard users can call Set-ScheduledTask on it
+                # without needing SeBatchLogonRight.
+                $EscapedScriptPath = [System.Security.SecurityElement]::Escape($ToastScriptPath)
+                $EscapedGUID = [System.Security.SecurityElement]::Escape($ToastGUID)
+                $TaskXml = @"
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>Toast Notification - Snooze Stage $i (pre-created, disabled until activated by snooze handler)</Description>
+  </RegistrationInfo>
+  <Triggers/>
+  <Principals>
+    <Principal id="Author">
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>false</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>true</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <Enabled>false</Enabled>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT1H</ExecutionTimeLimit>
+    <Priority>7</Priority>
+    <Compatibility>Win8</Compatibility>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>C:\WINDOWS\system32\WindowsPowerShell\v1.0\PowerShell.exe</Command>
+      <Arguments>-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File &quot;$EscapedScriptPath&quot; -ToastGUID &quot;$EscapedGUID&quot; -Snooze</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+"@
+                Register-ScheduledTask -TaskName $TaskName -Xml $TaskXml -Force -ErrorAction Stop | Out-Null
+                Write-Output "  Pre-created task: $TaskName [DISABLED, InteractiveToken]"
             }
             else {
                 # Task already exists from a previous deployment - skip re-registration.
@@ -596,7 +625,7 @@ function Initialize-SnoozeTasks {
                 # flags=0: only valid values per MSDN are 0 (default) and 0x10 (TASK_DONT_ADD_PRINCIPAL_ACE)
                 $NewSecDescriptor = 'D:(A;;GRGWGX;;;SY)(A;;GRGWGX;;;BA)(A;;GRGWGX;;;IU)'
                 $TaskObject.SetSecurityDescriptor($NewSecDescriptor, 0)
-                Write-Output "  Granted AU Generic All access: $TaskName [OK]"
+                Write-Output "  Granted IU GRGWGX access: $TaskName [OK]"
             }
             catch {
                 Write-Error "  [FAIL] Failed to set task ACL for ${TaskName}: $($_.Exception.Message)"
@@ -1486,7 +1515,11 @@ If ($XMLValid -eq $True) {
             # Pre-create snooze scheduled tasks (enterprise solution for standard user permissions)
             Write-Output "Pre-creating snooze scheduled tasks..."
             $TaskInitResult = Initialize-SnoozeTasks -ToastGUID $ToastGUID -ToastScriptPath $ScriptPath
-            if ($TaskInitResult) {
+            # Initialize-SnoozeTasks writes Write-Output strings before returning $true/$false.
+            # PowerShell captures ALL output (strings + boolean) into the array $TaskInitResult.
+            # Select-Object -Last 1 extracts the boolean return value from the end of the array.
+            $TaskInitSuccess = ($TaskInitResult | Select-Object -Last 1) -eq $true
+            if ($TaskInitSuccess) {
                 Write-Output "[OK] Snooze tasks pre-created - standard users can now activate them"
             }
             else {
