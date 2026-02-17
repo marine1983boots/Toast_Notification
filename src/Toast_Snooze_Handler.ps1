@@ -424,8 +424,10 @@ try {
 
     Write-Output "Registry updated and verified successfully"
 
-    # Calculate task expiry (2 minutes after trigger)
-    $Task_Expiry = $NextTrigger.AddMinutes(2).ToString('s')
+    # Task expiry window: 3 days after trigger.
+    # Allows the task to fire at the next login if the user was offline (e.g. midnight snooze,
+    # user returns next morning). StartWhenAvailable picks it up on login within this window.
+    $Task_Expiry = $NextTrigger.AddDays(3).ToString('s')
 
     # Get the toast script path (should be in same directory as this handler)
     $CurrentDir = Split-Path $MyInvocation.MyCommand.Path
@@ -478,7 +480,8 @@ try {
         $TaskSettings = New-ScheduledTaskSettingsSet `
             -MultipleInstances IgnoreNew `
             -ExecutionTimeLimit (New-TimeSpan -Hours 1) `
-            -DeleteExpiredTaskAfter (New-TimeSpan -Hours 2)
+            -StartWhenAvailable `
+            -DeleteExpiredTaskAfter (New-TimeSpan -Hours 4)
 
         # Register the task - standard users can register tasks that run as themselves
         Register-ScheduledTask `
@@ -492,7 +495,7 @@ try {
 
         Write-Output "[OK] Snooze task registered: $TaskName"
         Write-Output "     Fires at: $($NextTrigger.ToString('s'))"
-        Write-Output "     Expires at: $Task_Expiry"
+        Write-Output "     Expires at: $Task_Expiry (3 days - StartWhenAvailable enabled)"
         Write-Output "     Runs as: $env:USERNAME (Interactive, Limited)"
         Write-Output "     XMLSource: $StoredXMLSource"
         Write-Output "     ToastScenario: $StoredToastScenario"
