@@ -5,6 +5,14 @@ Created by:   Ben Whitmore
 Filename:     Toast_Notify.ps1
 ===========================================================================
 
+Version 2.20 - 17/02/2026
+-FIX: Initialize-SnoozeTasks now updates DACL on existing tasks (was skipping via continue)
+-FIX: Changed SDDL from FA (FILE_ALL_ACCESS) to GA (Generic All) for correct task object rights
+-DACL now applied regardless of whether task is new or pre-existing from previous deployment
+-Root cause: re-deploy found tasks already existing and did SuccessCount++; continue, skipping DACL grant
+-Tasks on test machine had DEFAULT DACL (SYSTEM+Admins only) because DACL block was never reached
+-Restructured for loop: create task if missing, then ALWAYS apply/verify DACL regardless
+
 Version 2.19 - 17/02/2026
 -FIX: Logging now works for both SYSTEM deployment and USER context execution
 -Start-Transcript called immediately after $LogPath is set (organized Logs\ folder)
@@ -506,41 +514,45 @@ function Initialize-SnoozeTasks {
 
         # Check if task already exists
         $ExistingTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-        if ($ExistingTask) {
-            Write-Output "  Task already exists: $TaskName [SKIPPED]"
-            $SuccessCount++
-            continue
-        }
 
         try {
-            # Create task action
-            $Task_Action = New-ScheduledTaskAction `
-                -Execute "C:\WINDOWS\system32\WindowsPowerShell\v1.0\PowerShell.exe" `
-                -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""$ToastScriptPath"" -ToastGUID ""$ToastGUID"" -Snooze"
+            if (-not $ExistingTask) {
+                # Task does not exist - create it first
+                # Create task action
+                $Task_Action = New-ScheduledTaskAction `
+                    -Execute "C:\WINDOWS\system32\WindowsPowerShell\v1.0\PowerShell.exe" `
+                    -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""$ToastScriptPath"" -ToastGUID ""$ToastGUID"" -Snooze"
 
-            # Create principal (USERS group - allows all users to modify)
-            $Task_Principal = New-ScheduledTaskPrincipal -GroupId "S-1-5-32-545" -RunLevel Limited
+                # Create principal (USERS group - allows all users to modify)
+                $Task_Principal = New-ScheduledTaskPrincipal -GroupId "S-1-5-32-545" -RunLevel Limited
 
-            # Create settings (task disabled by default, no trigger)
-            $Task_Settings = New-ScheduledTaskSettingsSet `
-                -Compatibility Win8 `
-                -AllowStartIfOnBatteries `
-                -DontStopIfGoingOnBatteries `
-                -Disable
+                # Create settings (task disabled by default, no trigger)
+                $Task_Settings = New-ScheduledTaskSettingsSet `
+                    -Compatibility Win8 `
+                    -AllowStartIfOnBatteries `
+                    -DontStopIfGoingOnBatteries `
+                    -Disable
 
-            # Create task (no trigger - will be set by snooze handler)
-            $New_Task = New-ScheduledTask `
-                -Description "Toast Notification - Snooze Stage $i (pre-created, disabled until activated by snooze handler)" `
-                -Action $Task_Action `
-                -Principal $Task_Principal `
-                -Settings $Task_Settings
+                # Create task (no trigger - will be set by snooze handler)
+                $New_Task = New-ScheduledTask `
+                    -Description "Toast Notification - Snooze Stage $i (pre-created, disabled until activated by snooze handler)" `
+                    -Action $Task_Action `
+                    -Principal $Task_Principal `
+                    -Settings $Task_Settings
 
-            # Register task (running as SYSTEM, so this works)
-            Register-ScheduledTask -TaskName $TaskName -InputObject $New_Task -Force -ErrorAction Stop | Out-Null
-            Write-Output "  Pre-created task: $TaskName [DISABLED]"
-            $SuccessCount++
+                # Register task (running as SYSTEM, so this works)
+                Register-ScheduledTask -TaskName $TaskName -InputObject $New_Task -Force -ErrorAction Stop | Out-Null
+                Write-Output "  Pre-created task: $TaskName [DISABLED]"
+            }
+            else {
+                # Task already exists from a previous deployment - skip re-registration.
+                # IMPORTANT: Do NOT continue here. Fall through to apply/update the DACL.
+                # Previous deployments may have left the task with default DACL (SYSTEM+Admins only),
+                # which means Set-ScheduledTask will fail with Access Denied for standard users.
+                Write-Output "  Task already exists: $TaskName [SKIPPED REGISTRATION - will update DACL]"
+            }
 
-            # Grant Authenticated Users read/write/execute on this task.
+            # DACL grant runs for BOTH new and pre-existing tasks.
             # Without this, Set-ScheduledTask / Enable-ScheduledTask fail with Access Denied
             # for standard users even though the task exists.
             # NOTE: GroupId S-1-5-32-545 above controls what account the task RUNS AS,
@@ -552,12 +564,14 @@ function Initialize-SnoozeTasks {
                 $TaskScheduler = New-Object -ComObject 'Schedule.Service'
                 $TaskScheduler.Connect()
                 $TaskObject = $TaskScheduler.GetFolder('\').GetTask($TaskName)
-                # Set DACL directly - avoids SDDL parsing bugs from GetSecurityDescriptor
+                # Set DACL directly using Generic All (GA) - correct for Task Scheduler objects.
+                # GA maps to TASK_ALL_ACCESS on task objects; FA (FILE_ALL_ACCESS) is for file objects
+                # and does not correctly map task modify rights on the COM task object interface.
                 # SDDL: SYSTEM full access, Administrators full access, Authenticated Users full access
                 # flags=0: only valid values per MSDN are 0 (default) and 0x10 (TASK_DONT_ADD_PRINCIPAL_ACE)
-                $NewSecDescriptor = 'D:(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;AU)'
+                $NewSecDescriptor = 'D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;AU)'
                 $TaskObject.SetSecurityDescriptor($NewSecDescriptor, 0)
-                Write-Output "  Granted AU full access: $TaskName [OK]"
+                Write-Output "  Granted AU Generic All access: $TaskName [OK]"
             }
             catch {
                 Write-Error "  [FAIL] Failed to set task ACL for ${TaskName}: $($_.Exception.Message)"
@@ -569,9 +583,12 @@ function Initialize-SnoozeTasks {
                     Remove-Variable -Name TaskScheduler -ErrorAction SilentlyContinue
                 }
             }
+
+            # Only increment success count after DACL grant succeeds
+            $SuccessCount++
         }
         catch {
-            Write-Warning "  Failed to pre-create task ${TaskName}: $($_.Exception.Message)"
+            Write-Warning "  Failed to process task ${TaskName}: $($_.Exception.Message)"
         }
     }
 

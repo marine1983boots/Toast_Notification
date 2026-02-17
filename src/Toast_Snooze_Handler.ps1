@@ -5,6 +5,14 @@ Created by:   Ben Whitmore (with AI assistance)
 Filename:     Toast_Snooze_Handler.ps1
 ===========================================================================
 
+Version 1.7 - 17/02/2026
+-FIX: Added $ErrorActionPreference='Continue' at start of all catch blocks
+-Prevents Write-Error in catch blocks from becoming terminating errors under $EAP='Stop'
+-Root cause of "614 char 5" error: $EAP='Stop' set in outer try (line 264) cascaded through
+ Write-Error calls inside inner catch blocks, causing them to throw and escape to outer catch
+-Set-ScheduledTask error messages now properly logged instead of being swallowed by the cascade
+-$ErrorActionPreference='Continue' resets error preference locally inside each catch block only
+
 Version 1.6 - 17/02/2026
 -Updated error messages: -EnableProgressive parameter renamed to -Snooze
 -Removed -SnoozeCount 0 from deployment command examples
@@ -215,6 +223,7 @@ function Parse-SnoozeUri {
         }
     }
     catch {
+        $ErrorActionPreference = 'Continue'
         Write-Error "Failed to parse snooze URI: $($_.Exception.Message)"
         Write-Error "Provided URI: $Uri"
         throw
@@ -230,6 +239,7 @@ try {
     $SnoozeInterval = $ParsedUri.Interval
 }
 catch {
+    $ErrorActionPreference = 'Continue'
     Write-Error "FATAL: Failed to parse protocol URI: $ProtocolUri"
     Write-Error $_.Exception.Message
     exit 1
@@ -244,7 +254,7 @@ if (!(Test-Path $LogDirectory)) {
 Start-Transcript -Path $LogPath -Append
 
 Write-Output "========================================="
-Write-Output "Toast Snooze Handler Started (v1.5.4)"
+Write-Output "Toast Snooze Handler Started (v1.7)"
 Write-Output "========================================="
 Write-Output "ProtocolUri: $ProtocolUri"
 Write-Output "ToastGUID: $ToastGUID"
@@ -340,6 +350,7 @@ try {
         Set-ItemProperty -Path $RegPath -Name "LastSnoozeInterval" -Value $SnoozeInterval -ErrorAction Stop
     }
     catch [System.UnauthorizedAccessException] {
+        $ErrorActionPreference = 'Continue'
         Write-Error "========================================"
         Write-Error "ACCESS DENIED - Registry Write Failed"
         Write-Error "========================================"
@@ -368,6 +379,7 @@ try {
         exit 1
     }
     catch {
+        $ErrorActionPreference = 'Continue'
         Write-Error "Failed to update registry: $($_.Exception.Message)"
         Stop-Transcript
         exit 1
@@ -432,11 +444,13 @@ try {
             }
         }
         catch [System.UnauthorizedAccessException] {
+            $ErrorActionPreference = 'Continue'
             # Non-fatal - cleanup failure shouldn't block snooze
             Write-Warning "Access denied disabling previous task: $PreviousTaskName"
             Write-Warning "Task will expire automatically per EndBoundary (graceful degradation)"
         }
         catch {
+            $ErrorActionPreference = 'Continue'
             # Non-fatal - cleanup failure shouldn't block snooze
             Write-Warning "Could not disable previous task $PreviousTaskName`: $($_.Exception.Message)"
             Write-Warning "Task will expire automatically per EndBoundary (graceful degradation)"
@@ -481,6 +495,7 @@ try {
             }
         }
         catch {
+            $ErrorActionPreference = 'Continue'
             Write-Error "[FAIL] Set-ScheduledTask failed: $($_.Exception.Message)"
             Write-Error "  Error Type: $($_.Exception.GetType().FullName)"
             Write-Error "  Error Code: $($_.Exception.HResult)"
@@ -496,6 +511,7 @@ try {
             Write-Output "  State after enable: $($EnabledTask.State)"
         }
         catch {
+            $ErrorActionPreference = 'Continue'
             Write-Error "[FAIL] Enable-ScheduledTask failed: $($_.Exception.Message)"
             Write-Error "  Error Type: $($_.Exception.GetType().FullName)"
             throw
@@ -522,6 +538,7 @@ try {
         Write-Output "========================================="
     }
     catch [Microsoft.Management.Infrastructure.CimException] {
+        $ErrorActionPreference = 'Continue'
         # Task doesn't exist - means Toast_Notify.ps1 wasn't deployed with -Snooze as SYSTEM
         Write-Error "========================================"
         Write-Error "PRE-CREATED TASK NOT FOUND"
@@ -555,6 +572,7 @@ try {
         exit 1
     }
     catch [System.UnauthorizedAccessException] {
+        $ErrorActionPreference = 'Continue'
         # Specific handling for Access Denied errors
         Write-Error "========================================"
         Write-Error "ACCESS DENIED - Cannot Modify Scheduled Task"
@@ -577,6 +595,7 @@ try {
         exit 1
     }
     catch {
+        $ErrorActionPreference = 'Continue'
         Write-Error "========================================"
         Write-Error "UNEXPECTED ERROR - Task Activation Failed"
         Write-Error "========================================"
@@ -611,6 +630,7 @@ try {
     Write-Output "========================================="
 }
 catch {
+    $ErrorActionPreference = 'Continue'
     Write-Error "An error occurred in Toast_Snooze_Handler:"
     Write-Error $_.Exception.Message
     Write-Error $_.ScriptStackTrace
