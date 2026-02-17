@@ -5,6 +5,13 @@ Created by:   Ben Whitmore
 Filename:     Toast_Notify.ps1
 ===========================================================================
 
+Version 2.19 - 17/02/2026
+-FIX: Logging now works for both SYSTEM deployment and USER context execution
+-Start-Transcript called immediately after $LogPath is set (organized Logs\ folder)
+-SYSTEM context: deployment output now captured (Initialize-SnoozeTasks, DACL grant, task registration)
+-USER context: transcript now uses organized Logs\ path instead of %WINDIR%\Temp\{GUID}.log
+-Both contexts produce timestamped log files in {WorkingDirectory}\{GUID}\Logs\
+
 Version 2.18 - 17/02/2026
 -FIX: SetSecurityDescriptor flags corrected from 4 to 0 in Initialize-SnoozeTasks
 -Per MSDN IRegisteredTask::SetSecurityDescriptor only accepts flags=0 or flags=0x10 (TASK_DONT_ADD_PRINCIPAL_ACE)
@@ -1341,6 +1348,7 @@ $FolderStructure = Initialize-ToastFolderStructure -BaseDirectory $BaseDirectory
 # Set paths for use throughout script
 $ToastPath = $FolderStructure.Scripts  # Scripts staged to Scripts subfolder
 $LogPath = Join-Path $FolderStructure.Logs "Toast_Notify_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+Start-Transcript -Path $LogPath -Append
 
 Write-Output "[OK] Working directory: $($FolderStructure.Base)"
 Write-Output "[OK] Scripts staged to: $($FolderStructure.Scripts)"
@@ -1595,13 +1603,12 @@ If ($XMLValid -eq $True) {
             -DeleteExpiredTaskAfter (New-TimeSpan -Days 30)
         $New_Task = New-ScheduledTask -Description "Toast_Notification_$($ToastGuid) Task for user notification. Title: $($EventTitle) :: Event:$($EventText) :: Source Path: $($ToastPath) " -Action $Task_Action -Principal $Task_Principal -Trigger $Task_Trigger -Settings $Task_Settings
         Register-ScheduledTask -TaskName "Toast_Notification_$($ToastGuid)" -InputObject $New_Task
+
+        Stop-Transcript
     }
 
     #Run the toast of the script is running in the context of the Logged On User
     If (!(([System.Security.Principal.WindowsIdentity]::GetCurrent()).Name -eq "NT AUTHORITY\SYSTEM")) {
-
-        $Log = (Join-Path $ENV:Windir "Temp\$($ToastGuid).log")
-        Start-Transcript $Log
 
         Write-Output "========================================="
         Write-Output "Toast Notification - User Context Execution"
