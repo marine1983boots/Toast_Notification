@@ -5,6 +5,16 @@ Created by:   Ben Whitmore (with AI assistance)
 Filename:     Toast_Snooze_Handler.ps1
 ===========================================================================
 
+Version 1.9 - 17/02/2026
+-ARCHITECTURE CHANGE: Replaced pre-created task activation with dynamic task creation in user context
+-ROOT CAUSE: All pre-created task principal types failed for standard user modification
+  (GroupId/SeBatchLogonRight, InteractiveToken/UserId schema, InteractiveToken without UserId/service error)
+-FIX: Standard users register tasks that run as themselves (-UserId $env:USERNAME -LogonType Interactive)
+-FIX: XMLSource and ToastScenario read from registry (stored by Toast_Notify.ps1 v2.23 SYSTEM deployment)
+-FIX: Secondary bug - previous task action args were missing -XMLSource and -ToastScenario parameters
+-Task naming changed: Toast_Notification_{GUID}_Snooze{N} (unique per snooze count, auto-expires)
+-Previous snooze task cleaned up via Unregister-ScheduledTask (non-fatal if already expired)
+
 Version 1.8 - 17/02/2026
 -FIX: Restructured task activation block - separate Get-ScheduledTask catch (task not found) from Set-ScheduledTask/Enable-ScheduledTask catch (activation failure)
 -Resolves misleading 'PRE-CREATED TASK NOT FOUND' message when actual error was Set-ScheduledTask access denied
@@ -259,7 +269,7 @@ if (!(Test-Path $LogDirectory)) {
 Start-Transcript -Path $LogPath -Append
 
 Write-Output "========================================="
-Write-Output "Toast Snooze Handler Started (v1.8)"
+Write-Output "Toast Snooze Handler Started (v1.9)"
 Write-Output "========================================="
 Write-Output "ProtocolUri: $ProtocolUri"
 Write-Output "ToastGUID: $ToastGUID"
@@ -291,6 +301,22 @@ try {
     $CurrentSnoozeCount = $CurrentState.SnoozeCount
 
     Write-Output "Current SnoozeCount: $CurrentSnoozeCount"
+
+    # Read XMLSource and ToastScenario from registry (stored by SYSTEM deployment v2.23+).
+    # These values are required to build correct task action arguments for the snooze task.
+    # Without them the re-displayed toast would use the default CustomMessage.xml which may
+    # not exist in the staged directory, causing the scheduled toast to fail silently.
+    $StoredXMLSource = $CurrentState.XMLSource
+    $StoredToastScenario = $CurrentState.ToastScenario
+    if ([string]::IsNullOrEmpty($StoredXMLSource)) {
+        Write-Warning "XMLSource not found in registry - using default CustomMessage.xml"
+        $StoredXMLSource = "CustomMessage.xml"
+    }
+    if ([string]::IsNullOrEmpty($StoredToastScenario)) {
+        $StoredToastScenario = "alarm"
+    }
+    Write-Output "Toast XMLSource: $StoredXMLSource"
+    Write-Output "Toast Scenario: $StoredToastScenario"
 
     # Validate snooze count (max 4)
     if ($CurrentSnoozeCount -ge 4) {
@@ -420,224 +446,98 @@ try {
 
     Write-Output "Toast script path: $ToastScriptPath"
 
-    # Activate the pre-created scheduled task (enterprise solution)
-    # Toast_Notify.ps1 pre-creates disabled tasks during SYSTEM deployment
-    # Standard users can modify (Set/Enable) existing tasks but cannot create new ones
-    Write-Output "Activating pre-created scheduled task..."
-    $TaskName = "Toast_Notification_$($ToastGuid)_Snooze$NewSnoozeCount"
+    # Create snooze scheduled task dynamically in user context (v1.9)
+    # Architecture change: tasks are created by the USER at snooze time rather than pre-created by SYSTEM.
+    # Standard users can register tasks that run as themselves (-UserId $env:USERNAME).
+    # This eliminates all GroupId/SeBatchLogonRight and InteractiveToken/UserId schema failures.
+    Write-Output "Creating snooze scheduled task..."
+    $TaskName = "Toast_Notification_${ToastGUID}_$($env:USERNAME)_Snooze${NewSnoozeCount}"
 
-    # Disable previous snooze task to prevent accumulation (only one active task at a time)
-    if ($NewSnoozeCount -gt 1) {
-        $PreviousSnoozeCount = $NewSnoozeCount - 1
-        $PreviousTaskName = "Toast_Notification_$($ToastGuid)_Snooze$PreviousSnoozeCount"
-
-        try {
-            Write-Output "Disabling previous snooze task: $PreviousTaskName"
-            $PreviousTask = Get-ScheduledTask -TaskName $PreviousTaskName -ErrorAction SilentlyContinue
-
-            if ($PreviousTask) {
-                if ($PreviousTask.State -ne 'Disabled') {
-                    Disable-ScheduledTask -TaskName $PreviousTaskName -ErrorAction Stop | Out-Null
-                    Write-Output "[OK] Previous task disabled: $PreviousTaskName"
-                }
-                else {
-                    Write-Output "[INFO] Previous task already disabled: $PreviousTaskName"
-                }
-            }
-            else {
-                Write-Output "[INFO] Previous task not found (may have expired): $PreviousTaskName"
-            }
-        }
-        catch [System.UnauthorizedAccessException] {
-            $ErrorActionPreference = 'Continue'
-            # Non-fatal - cleanup failure shouldn't block snooze
-            Write-Warning "Access denied disabling previous task: $PreviousTaskName"
-            Write-Warning "Task will expire automatically per EndBoundary (graceful degradation)"
-        }
-        catch {
-            $ErrorActionPreference = 'Continue'
-            # Non-fatal - cleanup failure shouldn't block snooze
-            Write-Warning "Could not disable previous task $PreviousTaskName`: $($_.Exception.Message)"
-            Write-Warning "Task will expire automatically per EndBoundary (graceful degradation)"
-        }
-    }
-    else {
-        Write-Output "[INFO] First snooze (count=1) - no previous task to disable"
-    }
-
-    # Step 1: Look up the pre-created task. Separate try/catch so CimException fires ONLY for
-    # "task not found", not for Set-ScheduledTask/Enable-ScheduledTask failures below.
-    $ExistingTask = $null
     try {
-        $ExistingTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
-    }
-    catch [Microsoft.Management.Infrastructure.CimException] {
-        $ErrorActionPreference = 'Continue'
-        # Task doesn't exist - means Toast_Notify.ps1 wasn't deployed with -Snooze as SYSTEM
-        Write-Error "========================================"
-        Write-Error "PRE-CREATED TASK NOT FOUND"
-        Write-Error "========================================"
-        Write-Error ""
-        Write-Error "Task '$TaskName' does not exist."
-        Write-Error "This means Toast_Notify.ps1 was not deployed correctly."
-        Write-Error ""
-        Write-Error "ROOT CAUSE:"
-        Write-Error "Standard users CANNOT create scheduled tasks (Windows security by design)."
-        Write-Error "Toast_Notify.ps1 must be deployed as SYSTEM with -Snooze to pre-create"
-        Write-Error "the required disabled tasks. Standard users can then modify these existing tasks."
-        Write-Error ""
-        Write-Error "SOLUTION:"
-        Write-Error "1. Re-deploy Toast_Notify.ps1 as SYSTEM with -Snooze parameter"
-        Write-Error "   This will pre-create 4 disabled scheduled tasks (Snooze1-4)"
-        Write-Error ""
-        Write-Error "Deployment command (run as SYSTEM via SCCM/Intune):"
-        Write-Error "   powershell.exe -ExecutionPolicy Bypass -File Toast_Notify.ps1 \"
-        Write-Error "       -ToastGUID ""$ToastGUID"" -Snooze"
-        Write-Error ""
-        Write-Error "After deployment, verify tasks exist in Task Scheduler:"
-        Write-Error "   Toast_Notification_{GUID}_Snooze1 [DISABLED]"
-        Write-Error "   Toast_Notification_{GUID}_Snooze2 [DISABLED]"
-        Write-Error "   Toast_Notification_{GUID}_Snooze3 [DISABLED]"
-        Write-Error "   Toast_Notification_{GUID}_Snooze4 [DISABLED]"
-        Write-Error ""
-        Write-Error "Current User: $env:USERNAME (USER context - cannot create tasks)"
-        Write-Error "========================================"
-        Stop-Transcript
-        exit 1
-    }
+        $ErrorActionPreference = 'Stop'
 
-    # Step 2: Activate the task (task IS found at this point).
-    # Separate try block from Step 1 so CimException in Step 1 fires ONLY for task-not-found.
-    # UnauthorizedAccessException and generic catch here handle Set-ScheduledTask / Enable-ScheduledTask failures.
-    try {
-        Write-Output "========================================="
-        Write-Output "TASK ACTIVATION - DETAILED DIAGNOSTICS"
-        Write-Output "========================================="
-        Write-Output "Found pre-created task: $TaskName"
-        Write-Output "  Current State: $($ExistingTask.State)"
-        Write-Output "  Current Triggers: $($ExistingTask.Triggers.Count)"
-        if ($ExistingTask.Triggers.Count -gt 0) {
-            Write-Output "  Existing Trigger Time: $($ExistingTask.Triggers[0].StartBoundary)"
-        }
-        Write-Output ""
+        # Build task components
+        $TaskArguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass" +
+            " -File `"$ToastScriptPath`"" +
+            " -ToastGUID `"$ToastGUID`"" +
+            " -XMLSource `"$StoredXMLSource`"" +
+            " -ToastScenario `"$StoredToastScenario`"" +
+            " -Snooze"
+        $TaskAction = New-ScheduledTaskAction `
+            -Execute "C:\WINDOWS\system32\WindowsPowerShell\v1.0\PowerShell.exe" `
+            -Argument $TaskArguments
 
-        # Create trigger for calculated time
-        Write-Output "Creating new trigger..."
-        $Task_Trigger = New-ScheduledTaskTrigger -Once -At $NextTrigger
-        $Task_Trigger.EndBoundary = $Task_Expiry
-        Write-Output "  Trigger Start: $($NextTrigger.ToString('s'))"
-        Write-Output "  Trigger End: $($Task_Expiry)"
-        Write-Output "  Trigger Type: $($Task_Trigger.GetType().Name)"
-        Write-Output ""
+        $TaskTrigger = New-ScheduledTaskTrigger -Once -At $NextTrigger
+        $TaskTrigger.EndBoundary = $Task_Expiry
 
-        # Update the task with new trigger (settings already correct from SYSTEM pre-creation)
-        Write-Output "Updating task trigger via Set-ScheduledTask..."
-        try {
-            $UpdatedTask = Set-ScheduledTask -TaskName $TaskName -Trigger $Task_Trigger -ErrorAction Stop
-            Write-Output "[OK] Set-ScheduledTask completed"
-            Write-Output "  Triggers after update: $($UpdatedTask.Triggers.Count)"
-            if ($UpdatedTask.Triggers.Count -gt 0) {
-                Write-Output "  New Trigger Start: $($UpdatedTask.Triggers[0].StartBoundary)"
-                Write-Output "  New Trigger End: $($UpdatedTask.Triggers[0].EndBoundary)"
-            }
-        }
-        catch {
-            $ErrorActionPreference = 'Continue'
-            Write-Error "[FAIL] Set-ScheduledTask failed: $($_.Exception.Message)"
-            Write-Error "  Error Type: $($_.Exception.GetType().FullName)"
-            Write-Error "  Error Code: $($_.Exception.HResult)"
-            throw
-        }
-        Write-Output ""
+        $TaskPrincipal = New-ScheduledTaskPrincipal `
+            -UserId $env:USERNAME `
+            -LogonType Interactive `
+            -RunLevel Limited
 
-        # Enable the task (standard users CAN do this)
-        Write-Output "Enabling task via Enable-ScheduledTask..."
-        try {
-            $EnabledTask = Enable-ScheduledTask -TaskName $TaskName -ErrorAction Stop
-            Write-Output "[OK] Enable-ScheduledTask completed"
-            Write-Output "  State after enable: $($EnabledTask.State)"
-        }
-        catch {
-            $ErrorActionPreference = 'Continue'
-            Write-Error "[FAIL] Enable-ScheduledTask failed: $($_.Exception.Message)"
-            Write-Error "  Error Type: $($_.Exception.GetType().FullName)"
-            throw
-        }
-        Write-Output ""
+        $TaskSettings = New-ScheduledTaskSettingsSet `
+            -MultipleInstances IgnoreNew `
+            -ExecutionTimeLimit (New-TimeSpan -Hours 1) `
+            -DeleteExpiredTaskAfter (New-TimeSpan -Hours 2)
 
-        # Verify task was enabled and trigger set
-        Write-Output "Final verification..."
-        $VerifyTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
-        Write-Output "  Final State: $($VerifyTask.State)"
-        Write-Output "  Final Trigger Count: $($VerifyTask.Triggers.Count)"
-        if ($VerifyTask.Triggers.Count -gt 0) {
-            Write-Output "  Final Trigger Start: $($VerifyTask.Triggers[0].StartBoundary)"
-            Write-Output "  Final Trigger End: $($VerifyTask.Triggers[0].EndBoundary)"
-            Write-Output "  Final Trigger Enabled: $($VerifyTask.Triggers[0].Enabled)"
-        }
+        # Register the task - standard users can register tasks that run as themselves
+        Register-ScheduledTask `
+            -TaskName $TaskName `
+            -Action $TaskAction `
+            -Trigger $TaskTrigger `
+            -Principal $TaskPrincipal `
+            -Settings $TaskSettings `
+            -Force `
+            -ErrorAction Stop | Out-Null
 
-        if ($VerifyTask.State -eq 'Ready') {
-            Write-Output "[OK] Task verification passed: State=Ready"
-        }
-        else {
-            Write-Warning "[WARNING] Task state is: $($VerifyTask.State) (expected: Ready)"
-        }
-        Write-Output "========================================="
-    }
-    catch [System.UnauthorizedAccessException] {
-        $ErrorActionPreference = 'Continue'
-        # Specific handling for Access Denied errors
-        Write-Error "========================================"
-        Write-Error "ACCESS DENIED - Cannot Modify Scheduled Task"
-        Write-Error "========================================"
-        Write-Error ""
-        Write-Error "Standard user '$env:USERNAME' cannot modify task '$TaskName'."
-        Write-Error ""
-        Write-Error "POSSIBLE CAUSES:"
-        Write-Error "1. Task exists but has restrictive permissions"
-        Write-Error "2. Group Policy prevents task modification by USERS group"
-        Write-Error "3. Task was not created with USERS group principal"
-        Write-Error ""
-        Write-Error "SOLUTION:"
-        Write-Error "Re-deploy Toast_Notify.ps1 as SYSTEM with -Snooze to ensure"
-        Write-Error "tasks are created with correct permissions (USERS group principal)."
-        Write-Error ""
-        Write-Error "Error Details: $($_.Exception.Message)"
-        Write-Error "========================================"
-        Stop-Transcript
-        exit 1
+        Write-Output "[OK] Snooze task registered: $TaskName"
+        Write-Output "     Fires at: $($NextTrigger.ToString('s'))"
+        Write-Output "     Expires at: $Task_Expiry"
+        Write-Output "     Runs as: $env:USERNAME (Interactive, Limited)"
+        Write-Output "     XMLSource: $StoredXMLSource"
+        Write-Output "     ToastScenario: $StoredToastScenario"
     }
     catch {
         $ErrorActionPreference = 'Continue'
         Write-Error "========================================"
-        Write-Error "UNEXPECTED ERROR - Task Activation Failed"
+        Write-Error "FAILED TO CREATE SNOOZE TASK"
         Write-Error "========================================"
-        Write-Error ""
-        Write-Error "An unexpected error occurred while activating task '$TaskName'."
-        Write-Error ""
-        Write-Error "Error Message: $($_.Exception.Message)"
+        Write-Error "Task: $TaskName"
+        Write-Error "Error: $($_.Exception.Message)"
         Write-Error "Error Type: $($_.Exception.GetType().FullName)"
         Write-Error ""
-        Write-Error "Current User: $env:USERNAME"
-        Write-Error "Current Time: $(Get-Date -Format 's')"
-        Write-Error ""
-        Write-Error "If this error persists, contact IT support with this log file."
+        Write-Error "This should not occur - standard users can register tasks as themselves."
+        Write-Error "Check if Task Scheduler service is running and user account is not restricted."
         Write-Error "========================================"
         Stop-Transcript
         exit 1
     }
 
-    Write-Output "========================================="
-    Write-Output "Task Activation Completed Successfully"
-    Write-Output "========================================="
+    # Clean up previous snooze task (non-fatal - task may have already expired/auto-deleted)
+    if ($NewSnoozeCount -gt 1) {
+        $PreviousTaskName = "Toast_Notification_${ToastGUID}_$($env:USERNAME)_Snooze$($NewSnoozeCount - 1)"
+        try {
+            $PreviousTask = Get-ScheduledTask -TaskName $PreviousTaskName -ErrorAction SilentlyContinue
+            if ($PreviousTask) {
+                Unregister-ScheduledTask -TaskName $PreviousTaskName -Confirm:$false -ErrorAction Stop
+                Write-Output "[OK] Cleaned up previous snooze task: $PreviousTaskName"
+            }
+            else {
+                Write-Output "[INFO] Previous task already removed (auto-expired): $PreviousTaskName"
+            }
+        }
+        catch {
+            Write-Warning "Could not clean up previous task ${PreviousTaskName}: $($_.Exception.Message)"
+            Write-Warning "Task will auto-delete per DeleteExpiredTaskAfter setting"
+        }
+    }
+    else {
+        Write-Output "[INFO] First snooze (count=1) - no previous task to clean up"
+    }
+
     Write-Output ""
-    Write-Output "Task Name: $TaskName"
-    Write-Output "Task State: Ready (enabled)"
-    Write-Output "Next Trigger: $($NextTrigger.ToString('s'))"
-    Write-Output "Snooze Count: $NewSnoozeCount/4"
-    Write-Output "User: $env:USERNAME"
-    Write-Output ""
-    Write-Output "User successfully snoozed to $($NextTrigger.ToString('g'))"
+    Write-Output "[OK] Snooze activated successfully"
+    Write-Output "     Next toast will appear at: $($NextTrigger.ToString('s'))"
     Write-Output "========================================="
     Write-Output "Toast Snooze Handler Completed Successfully"
     Write-Output "========================================="

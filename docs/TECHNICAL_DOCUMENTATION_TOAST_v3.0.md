@@ -5,7 +5,7 @@
 | Field | Value |
 |-------|-------|
 | Document Title | Technical Documentation - Progressive Toast Notification System v3.0 |
-| Version | 3.8 |
+| Version | 3.9 |
 | Date | 2026-02-17 |
 | Author | CR |
 | Based On | Toast by Ben Whitmore (@byteben) |
@@ -35,6 +35,7 @@
 | 3.6 | 2026-02-17 | CR | Updated for v2.18 (direct DACL set replaces GetSecurityDescriptor+append; flags corrected to 0), v2.19 (Start-Transcript in both SYSTEM and USER contexts), v2.20 (DACL loop restructured to cover existing tasks; SDDL FA corrected to GA), and Toast_Snooze_Handler.ps1 v1.7 (ErrorActionPreference=Continue in all catch blocks); added Sections 12.2.6, 12.2.7, 12.9, 12.10, 12.11; added code review records CR-TOAST-v2.18-001 through CR-TOAST-v1.7-001; updated operational procedure scripts and mitigation table |
 | 3.7 | 2026-02-17 | CR | Updated for v2.21 (root cause fix: task principal changed from GroupId S-1-5-32-545 TASK_LOGON_GROUP to UserId NT AUTHORITY\INTERACTIVE TASK_LOGON_INTERACTIVE_TOKEN; DACL updated from AU/GA to IU/GRGWGX per MSDN SeBatchLogonRight requirement and ISO 27001 A.9.4.1 least privilege) and Toast_Snooze_Handler.ps1 v1.8 (catch block restructured to isolate Get-ScheduledTask from Set-ScheduledTask exceptions); added Sections 12.2.8, 12.12; added code review records CR-TOAST-v2.21-001 and CR-TOAST-v1.8-001; updated ISO 27001 compliance assessment, operational procedures, and verification scripts |
 | 3.8 | 2026-02-17 | CR | Updated for v2.22 (fixed Register-ScheduledTask XML schema rejection: NT AUTHORITY\INTERACTIVE cannot appear as a UserId element in Task Scheduler XML; replaced New-ScheduledTaskPrincipal with manually constructed XML using InteractiveToken logon type and no UserId element; fixed false-positive boolean detection in Initialize-SnoozeTasks caller; corrected stale log message line 628 for ISO 27001 A.14.2.1 audit accuracy) and Toast_Snooze_Handler.ps1 v1.8 (version string corrected to v1.8); added Section 12.2.9 and Section 12.13; added code review record CR-TOAST-v2.22-001; added SEC-024 through SEC-027 |
+| 3.9 | 2026-02-17 | CR | Updated for v2.23 / v1.9 architecture change: removed pre-created scheduled task approach entirely; tasks now created dynamically by snooze handler in user context using Register-ScheduledTask -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited; Initialize-SnoozeTasks converted to no-op stub; SYSTEM deployment block now stores XMLSource and ToastScenario to HKLM registry; secondary bug fixed (missing -XMLSource/-ToastScenario args in task action); added Section 12.2.10 (Dynamic Snooze Task Creation architecture), Section 12.3.4 (ISO 27001 assessment update), Section 12.14 (change log); added code review record CR-TOAST-v2.23-001; added SEC-028 through SEC-032 |
 
 ## Table of Contents
 
@@ -51,7 +52,9 @@
 11. [Registry and Log Configuration](#11-registry-and-log-configuration)
 12. [Scheduled Task DACL Permission Architecture](#12-scheduled-task-dacl-permission-architecture)
     - 12.2.9 [Task Registration via Manually Constructed XML (v2.22)](#1229-task-registration-via-manually-constructed-xml-v222)
+    - 12.2.10 [Dynamic Snooze Task Creation (v2.23 Architecture)](#12210-dynamic-snooze-task-creation-v223-architecture)
     - 12.13 [Change Log for v2.22](#1213-change-log-for-v222)
+    - 12.14 [Change Log for v2.23 and v1.9](#1214-change-log-for-v223-and-v19)
 13. [Testing and Validation](#13-testing-and-validation)
 14. [Troubleshooting Guide](#14-troubleshooting-guide)
 15. [Maintenance Procedures](#15-maintenance-procedures)

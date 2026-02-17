@@ -5,6 +5,13 @@ Created by:   Ben Whitmore
 Filename:     Toast_Notify.ps1
 ===========================================================================
 
+Version 2.23 - 17/02/2026
+-ARCHITECTURE CHANGE: Removed task pre-creation from SYSTEM deployment (Initialize-SnoozeTasks now a no-op)
+-ROOT CAUSE: All principal types for pre-created tasks fail for standard user modification (GroupId/SeBatchLogonRight, InteractiveToken/UserId schema)
+-FIX: Tasks now created dynamically by user context (Toast_Snooze_Handler.ps1 v1.9) using user's own credentials
+-FIX: XMLSource and ToastScenario now stored in HKLM registry during SYSTEM deployment for snooze handler to use
+-SECONDARY BUG: Pre-created task args were missing -XMLSource and -ToastScenario, toast would have failed to display
+
 Version 2.22 - 17/02/2026
 -FIX: Replaced New-ScheduledTaskPrincipal + Register-ScheduledTask with Register-ScheduledTask -Xml in Initialize-SnoozeTasks
 -ROOT CAUSE: NT AUTHORITY\INTERACTIVE is a virtual SID rejected by Task Scheduler XML schema as <UserId> element
@@ -475,40 +482,50 @@ function Initialize-ToastRegistry {
 function Initialize-SnoozeTasks {
     <#
     .SYNOPSIS
-        Pre-creates disabled scheduled tasks for snooze stages
+        No-op stub - task pre-creation removed in v2.23
     .DESCRIPTION
-        Creates 4 disabled scheduled tasks during SYSTEM deployment that will be activated
-        by the snooze handler running in USER context. This solves the permission issue where
-        standard users cannot create scheduled tasks but CAN modify existing ones.
+        This function previously pre-created 4 disabled scheduled tasks during SYSTEM deployment.
+        That approach failed across all principal types:
 
-        Used when deploying a toast notification with -Snooze enabled.
-        This is the enterprise-grade PSADT pattern: SYSTEM creates, USER modifies.
+        - GroupId S-1-5-32-545 (v2.14-v2.20): MSDN requires SeBatchLogonRight for ANY caller
+          invoking Set-ScheduledTask on GroupId tasks. Standard users lack SeBatchLogonRight.
+          Access denied regardless of task DACL grant.
+
+        - NT AUTHORITY\INTERACTIVE as UserId (v2.21): Task Scheduler XML schema rejects virtual
+          SID names as <UserId> element. Error: "(43,4):Task:" at registration time.
+
+        - InteractiveToken without UserId (v2.22): Task Scheduler SERVICE requires UserId even
+          for InteractiveToken principal type. Error: "No mapping between account names and
+          security IDs was done. (11,8):UserId:"
+
+        Secondary bug discovered: pre-created task action arguments were missing -XMLSource and
+        -ToastScenario. Toast_Notify.ps1 defaults to CustomMessage.xml which may not exist in
+        the staged directory. The snooze task would have failed to display even if it fired.
+
+        ARCHITECTURAL CHANGE (v2.23):
+        Tasks are now created dynamically in user context by Toast_Snooze_Handler.ps1 v1.9.
+        Standard users can always register tasks that run as themselves:
+            Register-ScheduledTask -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
+        This requires no SeBatchLogonRight and avoids all principal resolution failures.
+
+        XMLSource and ToastScenario are stored in HKLM registry by the SYSTEM deployment block
+        so the snooze handler can read them when building the task action arguments.
+
+        This stub exists only to satisfy the call site at the SYSTEM deployment block.
+        It always returns $true so the deployment block can log success without errors.
     .PARAMETER ToastGUID
-        Unique identifier for this toast instance
+        Unique identifier for this toast instance (unused - retained for call-site compatibility)
     .PARAMETER ToastScriptPath
-        Full path to Toast_Notify.ps1 script
+        Full path to Toast_Notify.ps1 script (unused - retained for call-site compatibility)
     .NOTES
-        Requires: SYSTEM context (called during deployment phase only)
+        Version 2.23: Task pre-creation removed. Tasks created dynamically by
+        Toast_Snooze_Handler.ps1 v1.9 at snooze time using user's own credentials.
+        Users create tasks with -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited.
+        No SeBatchLogonRight needed. No principal resolution failures.
 
-        Security: Tasks are created with principal NT AUTHORITY\INTERACTIVE (TASK_LOGON_INTERACTIVE_TOKEN).
-        INTERACTIVE logon type is used so standard users can modify the task without needing
-        SeBatchLogonRight. GroupId (TASK_LOGON_GROUP) requires SeBatchLogonRight per MSDN
-        ITaskFolder::RegisterTaskDefinition. Standard users do not have SeBatchLogonRight by default,
-        which caused E_ACCESS_DENIED (0x80070005) on Set-ScheduledTask regardless of the task DACL.
-
-        Grants (A;;GA;;;AU) - Authenticated Users receive Generic All rights on each snooze task
-        DACL. This is intentional - all domain users must be able to activate their own snooze task
-        (Set-ScheduledTask / Enable-ScheduledTask).
-
-        Business Rationale:
-        - Multi-user shared endpoints need all users to action snooze notifications
-        - Deployment environment is assumed to be IT-managed (corporate managed endpoint)
-        - Task executable path is set at creation and cannot be changed via these permissions
-
-        Risk Mitigation:
-        - Task executable path is immutable (GA does not grant file-system write on target)
-        - Task trigger/schedule can be modified, but executes the same Toast_Notify.ps1 script
-        - ISO 27001 A.9.4.1: Task scope is limited to Toast GUID-specific tasks only
+        ISO 27001 A.9.4.1: Dynamic user-context task creation is least privilege -
+        each user's snooze task runs only as that specific user, never as a group or
+        interactive session that could span multiple users.
     #>
     [CmdletBinding()]
     param(
@@ -521,143 +538,10 @@ function Initialize-SnoozeTasks {
         [String]$ToastScriptPath
     )
 
-    # Only create tasks if running as SYSTEM (called by -Snooze deployment block)
-    $CurrentIdentity = ([System.Security.Principal.WindowsIdentity]::GetCurrent()).Name
-    if ($CurrentIdentity -ne "NT AUTHORITY\SYSTEM") {
-        Write-Verbose "Not running as SYSTEM - skipping task pre-creation"
-        return $false
-    }
-
-    Write-Output "Pre-creating snooze scheduled tasks..."
-    $SuccessCount = 0
-
-    for ($i = 1; $i -le 4; $i++) {
-        $TaskName = "Toast_Notification_$($ToastGUID)_Snooze$i"
-
-        # Check if task already exists
-        $ExistingTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-
-        try {
-            if (-not $ExistingTask) {
-                # Task does not exist - create it using raw XML.
-                # New-ScheduledTaskPrincipal always emits a <UserId> element in the task XML.
-                # The Task Scheduler XML schema rejects NT AUTHORITY\INTERACTIVE as a <UserId>
-                # value because it is a virtual SID (not a resolvable account), producing:
-                #   "The task XML contains a value which is incorrectly formatted or out of range. (43,4):Task:"
-                # Register-ScheduledTask -Xml bypasses New-ScheduledTaskPrincipal entirely,
-                # allowing us to emit <LogonType>InteractiveToken</LogonType> with NO <UserId>
-                # element. This produces a valid InteractiveToken task that runs as whoever is
-                # logged in interactively, and standard users can call Set-ScheduledTask on it
-                # without needing SeBatchLogonRight.
-                $EscapedScriptPath = [System.Security.SecurityElement]::Escape($ToastScriptPath)
-                $EscapedGUID = [System.Security.SecurityElement]::Escape($ToastGUID)
-                $TaskXml = @"
-<?xml version="1.0" encoding="UTF-16"?>
-<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <RegistrationInfo>
-    <Description>Toast Notification - Snooze Stage $i (pre-created, disabled until activated by snooze handler)</Description>
-  </RegistrationInfo>
-  <Triggers/>
-  <Principals>
-    <Principal id="Author">
-      <LogonType>InteractiveToken</LogonType>
-      <RunLevel>LeastPrivilege</RunLevel>
-    </Principal>
-  </Principals>
-  <Settings>
-    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
-    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
-    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
-    <AllowHardTerminate>true</AllowHardTerminate>
-    <StartWhenAvailable>false</StartWhenAvailable>
-    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
-    <IdleSettings>
-      <StopOnIdleEnd>true</StopOnIdleEnd>
-      <RestartOnIdle>false</RestartOnIdle>
-    </IdleSettings>
-    <Enabled>false</Enabled>
-    <WakeToRun>false</WakeToRun>
-    <ExecutionTimeLimit>PT1H</ExecutionTimeLimit>
-    <Priority>7</Priority>
-    <Compatibility>Win8</Compatibility>
-  </Settings>
-  <Actions Context="Author">
-    <Exec>
-      <Command>C:\WINDOWS\system32\WindowsPowerShell\v1.0\PowerShell.exe</Command>
-      <Arguments>-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File &quot;$EscapedScriptPath&quot; -ToastGUID &quot;$EscapedGUID&quot; -Snooze</Arguments>
-    </Exec>
-  </Actions>
-</Task>
-"@
-                Register-ScheduledTask -TaskName $TaskName -Xml $TaskXml -Force -ErrorAction Stop | Out-Null
-                Write-Output "  Pre-created task: $TaskName [DISABLED, InteractiveToken]"
-            }
-            else {
-                # Task already exists from a previous deployment - skip re-registration.
-                # IMPORTANT: Do NOT continue here. Fall through to apply/update the DACL.
-                # Previous deployments may have left the task with default DACL (SYSTEM+Admins only),
-                # which means Set-ScheduledTask will fail with Access Denied for standard users.
-                Write-Output "  Task already exists: $TaskName [SKIPPED REGISTRATION - will update DACL]"
-            }
-
-            # DACL grant runs for BOTH new and pre-existing tasks.
-            # Without this, Set-ScheduledTask / Enable-ScheduledTask fail with Access Denied
-            # for standard users even though the task exists.
-            # NOTE: NT AUTHORITY\INTERACTIVE above specifies the task runs as the interactive user.
-            #       The task DACL (below) controls who can MODIFY the task definition via
-            #       Set-ScheduledTask/Enable-ScheduledTask. The task DACL is stored separately in
-            #       the registry and defaults to Administrators+SYSTEM only without this grant.
-            $TaskScheduler = $null
-            try {
-                $ErrorActionPreference = 'Stop'
-                $TaskScheduler = New-Object -ComObject 'Schedule.Service'
-                $TaskScheduler.Connect()
-                $TaskObject = $TaskScheduler.GetFolder('\').GetTask($TaskName)
-                # Set DACL directly using Generic All (GA) - correct for Task Scheduler objects.
-                # GA maps to TASK_ALL_ACCESS on task objects; FA (FILE_ALL_ACCESS) is for file objects
-                # and does not correctly map task modify rights on the COM task object interface.
-                # SDDL: SYSTEM full access, Administrators full access, INTERACTIVE users read/write/execute
-                # IU (INTERACTIVE, S-1-5-4) instead of AU (Authenticated Users) per ISO 27001 A.9.4.1 least privilege.
-                # IU restricts to users with an active interactive session only. AU would allow any domain user
-                # (including background services and network logons) to modify task triggers - ISO non-compliant.
-                # GRGWGX (Generic Read+Write+Execute) instead of GA (Generic All) omits DELETE/WRITE_DAC/WRITE_OWNER.
-                # Set-ScheduledTask and Enable-ScheduledTask only need Read+Write+Execute access.
-                # flags=0: only valid values per MSDN are 0 (default) and 0x10 (TASK_DONT_ADD_PRINCIPAL_ACE)
-                $NewSecDescriptor = 'D:(A;;GRGWGX;;;SY)(A;;GRGWGX;;;BA)(A;;GRGWGX;;;IU)'
-                $TaskObject.SetSecurityDescriptor($NewSecDescriptor, 0)
-                Write-Output "  Granted IU GRGWGX access: $TaskName [OK]"
-            }
-            catch {
-                Write-Error "  [FAIL] Failed to set task ACL for ${TaskName}: $($_.Exception.Message)"
-                throw
-            }
-            finally {
-                if ($null -ne $TaskScheduler) {
-                    [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($TaskScheduler)
-                    Remove-Variable -Name TaskScheduler -ErrorAction SilentlyContinue
-                }
-            }
-
-            # Only increment success count after DACL grant succeeds
-            $SuccessCount++
-        }
-        catch {
-            Write-Warning "  Failed to process task ${TaskName}: $($_.Exception.Message)"
-        }
-    }
-
-    if ($SuccessCount -eq 4) {
-        Write-Output "[OK] All 4 snooze tasks pre-created successfully"
-        return $true
-    }
-    elseif ($SuccessCount -gt 0) {
-        Write-Warning "Only $SuccessCount of 4 tasks created - snooze may fail at later stages"
-        return $true
-    }
-    else {
-        Write-Error "Failed to create any snooze tasks"
-        return $false
-    }
+    Write-Output "Pre-creating snooze scheduled tasks... [SKIPPED - tasks created dynamically in user context v2.23]"
+    Write-Output "[OK] Task pre-creation bypassed - Toast_Snooze_Handler.ps1 v1.9 creates tasks at snooze time"
+    Write-Output "     Standard users create tasks with their own credentials (no SeBatchLogonRight needed)"
+    return $true
 }
 
 function Get-ToastState {
@@ -1494,6 +1378,25 @@ If ($XMLValid -eq $True) {
             }
 
             Write-Output "Registry initialization verified: SnoozeCount=$($RegVerify.SnoozeCount)"
+
+            # Store XMLSource and ToastScenario in registry for snooze handler to read.
+            # Snooze handler (v1.9) creates task action arguments dynamically using these values.
+            # Without this, the snooze task would default to CustomMessage.xml which may not
+            # exist in the staged directory and the re-displayed toast would fail silently.
+            Write-Output "Storing XMLSource and ToastScenario in registry for snooze handler..."
+            try {
+                $ErrorActionPreference = 'Stop'
+                Set-ItemProperty -Path "${RegistryHive}:\${RegistryPath}\$ToastGUID" `
+                    -Name "XMLSource" -Value $XMLSource -Type String
+                Set-ItemProperty -Path "${RegistryHive}:\${RegistryPath}\$ToastGUID" `
+                    -Name "ToastScenario" -Value $ToastScenario -Type String
+                Write-Output "[OK] XMLSource stored: $XMLSource"
+                Write-Output "[OK] ToastScenario stored: $ToastScenario"
+            }
+            catch {
+                Write-Warning "Failed to store XMLSource/ToastScenario in registry: $($_.Exception.Message)"
+                Write-Warning "Snooze tasks may default to CustomMessage.xml"
+            }
 
             # Grant permissions if using HKLM (machine-wide state)
             if ($RegistryHive -eq 'HKLM') {
