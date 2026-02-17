@@ -375,7 +375,10 @@ Param
     [ValidateRange(1, 365)]
     [Int]$CleanupDaysThreshold = 30,
     [Parameter(Mandatory = $False)]
-    [Switch]$Dismiss = $false
+    [Switch]$Dismiss = $false,
+    [Parameter(Mandatory = $False)]
+    [ValidateLength(1, 128)]
+    [String]$AppIDName = "System IT"
 )
 
 #region Helper Functions
@@ -1361,7 +1364,6 @@ If ($XMLValid -eq $True) {
     # Detect hardware vendor via CIM and select per-manufacturer config from XML.
     # Supported: HP, Lenovo. Unknown vendors fall back to Default config.
     $DetectedManufacturer = 'Default'
-    $AppIDDisplayName = 'Toast Notification System'
     try {
         $RawManufacturer = (Get-CimInstance -ClassName Win32_ComputerSystemProduct -ErrorAction Stop).Vendor
         Write-Verbose "Raw manufacturer string: $RawManufacturer"
@@ -1378,17 +1380,14 @@ If ($XMLValid -eq $True) {
     switch -Regex ($RawManufacturer) {
         '(?i)HP|Hewlett' {
             $DetectedManufacturer = 'HP'
-            $AppIDDisplayName = 'HP Support System'
             Write-Verbose "Manufacturer resolved: HP"
         }
         '(?i)Lenovo' {
             $DetectedManufacturer = 'Lenovo'
-            $AppIDDisplayName = 'Lenovo Support System'
             Write-Verbose "Manufacturer resolved: Lenovo"
         }
         default {
             $DetectedManufacturer = 'Default'
-            $AppIDDisplayName = 'Toast Notification System'
             Write-Verbose "Manufacturer unrecognised ($RawManufacturer) - using Default config"
         }
     }
@@ -1417,6 +1416,10 @@ If ($XMLValid -eq $True) {
     # Replace {MANUFACTURER} token in toast header variables
     $EventTitle = $EventTitle -replace '\{MANUFACTURER\}', $DetectedManufacturer
     $ToastTitle = $ToastTitle -replace '\{MANUFACTURER\}', $DetectedManufacturer
+
+    # App display name: set by -AppIDName parameter (default: "System IT")
+    $AppIDDisplayName = $AppIDName
+    Write-Verbose "AppIDDisplayName: $AppIDDisplayName"
 
     #Set COM App ID for toast notifications
     # Use custom AppId following BurntToast approach for reliability
