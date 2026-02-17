@@ -5,18 +5,44 @@
 .DESCRIPTION
     This script is invoked when user clicks "Reboot Now" button in Stage 4 toast.
     Cancels any pending shutdown countdown and initiates immediate reboot (10 second warning).
+    When invoked from a -Snooze toast, also cleans up registry state and scheduled tasks
+    for this toast GUID before rebooting.
+
+    Version 1.1 - 17/02/2026
+    -Added registry cleanup before reboot: removes GUID registry key (clears snooze state)
+    -Added scheduled task cleanup: disables all 4 pre-created snooze tasks for this GUID
+    -Added -RegistryHive and -RegistryPath parameters for registry location targeting
+    -Reboot Now from any stage (0-4) now cleanly removes all toast artefacts before rebooting
 
 .PARAMETER ProtocolUri
     The protocol URI passed from toast action (format: toast-reboot://GUID/immediate)
 
+.PARAMETER RegistryHive
+    Registry hive where toast state is stored. HKLM (default) or HKCU.
+
+.PARAMETER RegistryPath
+    Registry path under the hive. Default: SOFTWARE\ToastNotification
+
+.PARAMETER LogDirectory
+    Directory for log output. Defaults to %WINDIR%\Temp.
+
 .EXAMPLE
     Toast_Reboot_Handler.ps1 -ProtocolUri "toast-reboot://ABC-123/immediate"
+
+.EXAMPLE
+    Toast_Reboot_Handler.ps1 -ProtocolUri "toast-reboot://ABC-123/immediate" -RegistryHive HKLM -RegistryPath "SOFTWARE\ToastNotification"
 #>
 
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
     [String]$ProtocolUri,
+    [Parameter(Mandatory = $false)]
+    [ValidateSet('HKLM', 'HKCU')]
+    [String]$RegistryHive = 'HKLM',
+    [Parameter(Mandatory = $false)]
+    [ValidatePattern('^[a-zA-Z0-9_\\]+$')]
+    [String]$RegistryPath = 'SOFTWARE\ToastNotification',
     [Parameter(Mandatory = $false)]
     [String]$LogDirectory = $ENV:WINDIR + "\Temp"
 )
@@ -47,6 +73,50 @@ try {
         switch ($Action.ToLower()) {
             'immediate' {
                 Write-Output "User requested IMMEDIATE REBOOT"
+
+                Write-Output "Cleaning up toast registry state and scheduled tasks..."
+
+                # 1. Remove registry state for this toast GUID
+                $RegKeyPath = "${RegistryHive}:\${RegistryPath}\$ToastGUID"
+                try {
+                    if (Test-Path $RegKeyPath) {
+                        Remove-Item -Path $RegKeyPath -Recurse -Force -ErrorAction Stop
+                        Write-Output "[OK] Registry state removed: $RegKeyPath"
+                    }
+                    else {
+                        Write-Output "[INFO] Registry key not found (already removed or not created): $RegKeyPath"
+                    }
+                }
+                catch {
+                    Write-Warning "Could not remove registry key: $($_.Exception.Message)"
+                    Write-Warning "Continuing with reboot - registry cleanup non-fatal"
+                }
+
+                # 2. Disable all pre-created snooze tasks for this GUID
+                for ($i = 1; $i -le 4; $i++) {
+                    $TaskName = "Toast_Notification_$($ToastGUID)_Snooze$i"
+                    try {
+                        $Task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+                        if ($Task) {
+                            if ($Task.State -ne 'Disabled') {
+                                Disable-ScheduledTask -TaskName $TaskName -ErrorAction Stop | Out-Null
+                                Write-Output "[OK] Snooze task disabled: $TaskName"
+                            }
+                            else {
+                                Write-Output "[INFO] Snooze task already disabled: $TaskName"
+                            }
+                        }
+                        else {
+                            Write-Output "[INFO] Snooze task not found (may not have been pre-created): $TaskName"
+                        }
+                    }
+                    catch {
+                        Write-Warning "Could not disable task ${TaskName}: $($_.Exception.Message)"
+                        Write-Warning "Continuing with reboot - task cleanup non-fatal"
+                    }
+                }
+
+                Write-Output "[OK] Cleanup completed - proceeding with reboot"
                 Write-Output "Cancelling any pending shutdown countdown..."
 
                 # Cancel any existing shutdown

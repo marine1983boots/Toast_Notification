@@ -5,6 +5,15 @@ Created by:   Ben Whitmore
 Filename:     Toast_Notify.ps1
 ===========================================================================
 
+Version 2.13 - 17/02/2026
+-Pass -RegistryHive and -RegistryPath to Toast_Reboot_Handler.ps1 command registration
+-Enables reboot handler to clean up registry and tasks using correct registry location
+
+Version 2.12 - 17/02/2026
+-FIX: Replaced Dismiss button with Reboot Now button for Stages 0-3 in -Snooze mode
+-Snooze mode now shows: Snooze (0-2) + Learn More + Reboot Now (all stages)
+-Stage 4: Reboot Now only (unchanged)
+
 Version 2.11 - 17/02/2026
 -SIMPLIFICATION: Merged -EnableProgressive into -Snooze (single activation switch)
 -Removed -EnableProgressive parameter (breaking change - use -Snooze instead)
@@ -1465,7 +1474,7 @@ If ($XMLValid -eq $True) {
 
                 # Set command to Toast_Reboot_Handler.ps1 with log directory
                 $RebootHandlerPath = Join-Path $ToastPath "Toast_Reboot_Handler.ps1"
-                $RebootCmdParams = "-ProtocolUri `"%1`" -LogDirectory `"$($FolderStructure.Logs)`""
+                $RebootCmdParams = "-ProtocolUri `"%1`" -RegistryHive $RegistryHive -RegistryPath `"$RegistryPath`" -LogDirectory `"$($FolderStructure.Logs)`""
                 $RebootCommandValue = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$RebootHandlerPath`" $RebootCmdParams"
                 Set-ItemProperty -Path $RebootCommandKey -Name "(Default)" -Value $RebootCommandValue -Force
 
@@ -1826,10 +1835,11 @@ If ($XMLValid -eq $True) {
                 $ActionsXML += "<action arguments=`"$ButtonAction_Safe`" content=`"$ButtonTitle_Safe`" activationType=`"protocol`" />"
             }
 
-            # Add dismiss button for Stages 0-3 only (Stage 4 not dismissable)
+            # Add Reboot Now button for Stages 0-3 (Stage 4 uses Reboot Now as the only button)
             if ($StageConfig.AllowDismiss) {
-                Write-Output "Adding dismiss button"
-                $ActionsXML += "<action arguments=`"dismiss`" content=`"Dismiss`" activationType=`"system`"/>"
+                $RebootProtocolUri = "toast-reboot://$ToastGUID/immediate"
+                Write-Output "Adding reboot now button for Stage $($StageConfig.Stage)"
+                $ActionsXML += "<action arguments=`"$RebootProtocolUri`" content=`"$RebootTitle_Safe`" activationType=`"protocol`"/>"
             }
 
             $ActionsXML += "</actions></toast>"
