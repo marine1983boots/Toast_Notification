@@ -8,6 +8,12 @@
     When invoked from a -Snooze toast, also cleans up registry state and scheduled tasks
     for this toast GUID before rebooting.
 
+    Version 1.2 - 17/02/2026
+    -FIX: Task cleanup now uses username-qualified names matching v1.9 snooze handler format
+    -FIX: Use Unregister-ScheduledTask instead of Disable-ScheduledTask (fully removes tasks)
+    -FIX: Added cleanup of main Toast_Notification_{GUID} task to prevent re-display after reboot
+    -Loop extended to 10 snooze iterations (was 4, breaks early if no more tasks found)
+
     Version 1.1 - 17/02/2026
     -Added registry cleanup before reboot: removes GUID registry key (clears snooze state)
     -Added scheduled task cleanup: disables all 4 pre-created snooze tasks for this GUID
@@ -92,28 +98,45 @@ try {
                     Write-Warning "Continuing with reboot - registry cleanup non-fatal"
                 }
 
-                # 2. Disable all pre-created snooze tasks for this GUID
-                for ($i = 1; $i -le 4; $i++) {
-                    $TaskName = "Toast_Notification_$($ToastGUID)_Snooze$i"
+                # 2. Unregister all user-specific snooze tasks for this GUID
+                # v1.9+: task names include username to deconflict multi-user endpoints
+                # Format: Toast_Notification_{GUID}_{Username}_Snooze{N}
+                $CleanupUsername = $env:USERNAME
+                for ($i = 1; $i -le 10; $i++) {
+                    $TaskName = "Toast_Notification_${ToastGUID}_${CleanupUsername}_Snooze${i}"
                     try {
                         $Task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
                         if ($Task) {
-                            if ($Task.State -ne 'Disabled') {
-                                Disable-ScheduledTask -TaskName $TaskName -ErrorAction Stop | Out-Null
-                                Write-Output "[OK] Snooze task disabled: $TaskName"
-                            }
-                            else {
-                                Write-Output "[INFO] Snooze task already disabled: $TaskName"
-                            }
+                            Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop
+                            Write-Output "[OK] Snooze task removed: $TaskName"
                         }
                         else {
-                            Write-Output "[INFO] Snooze task not found (may not have been pre-created): $TaskName"
+                            # No more tasks at this index - stop looking
+                            if ($i -gt 1) { break }
                         }
                     }
                     catch {
-                        Write-Warning "Could not disable task ${TaskName}: $($_.Exception.Message)"
-                        Write-Warning "Continuing with reboot - task cleanup non-fatal"
+                        Write-Warning "Could not remove task ${TaskName}: $($_.Exception.Message)"
+                        Write-Warning "Continuing - task cleanup non-fatal"
                     }
+                }
+
+                # 3. Disable the main notification task to prevent re-display after reboot
+                # Without this, Toast_Notification_{GUID} fires again after restart
+                $MainTaskName = "Toast_Notification_$ToastGUID"
+                try {
+                    $MainTask = Get-ScheduledTask -TaskName $MainTaskName -ErrorAction SilentlyContinue
+                    if ($MainTask) {
+                        Disable-ScheduledTask -TaskName $MainTaskName -ErrorAction Stop | Out-Null
+                        Write-Output "[OK] Main notification task disabled: $MainTaskName"
+                    }
+                    else {
+                        Write-Output "[INFO] Main notification task not found: $MainTaskName"
+                    }
+                }
+                catch {
+                    Write-Warning "Could not disable main task ${MainTaskName}: $($_.Exception.Message)"
+                    Write-Warning "Continuing - task cleanup non-fatal"
                 }
 
                 Write-Output "[OK] Cleanup completed - proceeding with reboot"
