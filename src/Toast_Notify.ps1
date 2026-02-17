@@ -5,6 +5,13 @@ Created by:   Ben Whitmore
 Filename:     Toast_Notify.ps1
 ===========================================================================
 
+Version 2.18 - 17/02/2026
+-FIX: SetSecurityDescriptor flags corrected from 4 to 0 in Initialize-SnoozeTasks
+-Per MSDN IRegisteredTask::SetSecurityDescriptor only accepts flags=0 or flags=0x10 (TASK_DONT_ADD_PRINCIPAL_ACE)
+-flags=4 caused E_INVALIDARG (value does not fall within the expected range) at runtime
+-Replaced GetSecurityDescriptor + SDDL append with direct DACL set: D:(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;AU)
+-Direct DACL avoids SDDL parsing bugs (GetSecurityDescriptor(4) may return string without D: prefix)
+
 Version 2.17 - 17/02/2026
 -FIX: Correct SetSecurityDescriptor DACL grant in Initialize-SnoozeTasks (three bugs fixed):
   1. GetSecurityDescriptor(4) instead of (0xF) - DACL_SECURITY_INFORMATION only; avoids SACL section
@@ -532,24 +539,18 @@ function Initialize-SnoozeTasks {
             # NOTE: GroupId S-1-5-32-545 above controls what account the task RUNS AS,
             #       not who can MODIFY it. The task DACL is stored separately in the
             #       registry and defaults to Administrators+SYSTEM only.
-            # SDDL: (A;;GA;;;AU) = Allow Generic All (TASK_ALL_ACCESS) to Authenticated Users
             $TaskScheduler = $null
             try {
                 $ErrorActionPreference = 'Stop'
                 $TaskScheduler = New-Object -ComObject 'Schedule.Service'
                 $TaskScheduler.Connect()
                 $TaskObject = $TaskScheduler.GetFolder('\').GetTask($TaskName)
-                # 4 = DACL_SECURITY_INFORMATION only (avoids SACL section that breaks ACE appending)
-                $SecDescriptor = $TaskObject.GetSecurityDescriptor(4)
-                if ($SecDescriptor -notmatch '(?i)A;;(?:FA|GA|GRGWGX);;;AU') {
-                    $SecDescriptor += '(A;;GA;;;AU)'
-                    # 4 = DACL_SECURITY_INFORMATION - CRITICAL: using 0 is a no-op and does NOT write DACL
-                    $TaskObject.SetSecurityDescriptor($SecDescriptor, 4)
-                    Write-Output "  Granted AU full access: $TaskName [OK]"
-                }
-                else {
-                    Write-Output "  AU modify rights already present: $TaskName [SKIP]"
-                }
+                # Set DACL directly - avoids SDDL parsing bugs from GetSecurityDescriptor
+                # SDDL: SYSTEM full access, Administrators full access, Authenticated Users full access
+                # flags=0: only valid values per MSDN are 0 (default) and 0x10 (TASK_DONT_ADD_PRINCIPAL_ACE)
+                $NewSecDescriptor = 'D:(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;AU)'
+                $TaskObject.SetSecurityDescriptor($NewSecDescriptor, 0)
+                Write-Output "  Granted AU full access: $TaskName [OK]"
             }
             catch {
                 Write-Error "  [FAIL] Failed to set task ACL for ${TaskName}: $($_.Exception.Message)"
