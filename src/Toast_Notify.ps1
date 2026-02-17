@@ -1845,7 +1845,7 @@ If ($XMLValid -eq $True) {
             # Add snooze button for Stages 0-2 only (Stage 3 is final warning with no snooze)
             # Stage 3: User must decide - Reboot Now or Dismiss (transitions to Stage 4)
             # Stage 4: No snooze, forced reboot decision
-            if ($StageConfig.Stage -lt 3 -and -not [string]::IsNullOrEmpty($StageConfig.SnoozeInterval)) {
+            if ($Snooze -and $StageConfig.Stage -lt 3 -and -not [string]::IsNullOrEmpty($StageConfig.SnoozeInterval)) {
                 $SnoozeInterval = $StageConfig.SnoozeInterval
                 $SnoozeLabel = ""
                 switch ($SnoozeInterval) {
