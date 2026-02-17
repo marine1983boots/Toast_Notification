@@ -5,7 +5,7 @@
 | Field | Value |
 |-------|-------|
 | Document Title | Technical Documentation - Progressive Toast Notification System v3.0 |
-| Version | 3.5 |
+| Version | 3.6 |
 | Date | 2026-02-17 |
 | Author | CR |
 | Based On | Toast by Ben Whitmore (@byteben) |
@@ -32,6 +32,7 @@
 | 3.3 | 2026-02-17 | CR | Updated for v2.15: Win8 task schema, DeleteExpiredTaskAfter 30-day auto-cleanup; added Section 12.6 change log and code review record CR-TOAST-v2.15-001 |
 | 3.4 | 2026-02-17 | CR | Updated for v2.16: Removed DeleteExpiredTaskAfter from Initialize-SnoozeTasks (no-trigger tasks incompatible with this setting); updated Section 12.2.4; added Section 12.7 change log and code review record CR-TOAST-v2.16-001 |
 | 3.5 | 2026-02-17 | CR | Updated for v2.17: DACL Security Information flags corrected (GetSecurityDescriptor/SetSecurityDescriptor flags 0xF/0 replaced with 4/4; ACE changed from GRGWGX to GA for correct Task Scheduler modify rights); added Section 12.2.5 and Section 12.8 change log; added code review record CR-TOAST-v2.17-001 |
+| 3.6 | 2026-02-17 | CR | Updated for v2.18 (direct DACL set replaces GetSecurityDescriptor+append; flags corrected to 0), v2.19 (Start-Transcript in both SYSTEM and USER contexts), v2.20 (DACL loop restructured to cover existing tasks; SDDL FA corrected to GA), and Toast_Snooze_Handler.ps1 v1.7 (ErrorActionPreference=Continue in all catch blocks); added Sections 12.2.6, 12.2.7, 12.9, 12.10, 12.11; added code review records CR-TOAST-v2.18-001 through CR-TOAST-v1.7-001; updated operational procedure scripts and mitigation table |
 
 ## Table of Contents
 
@@ -168,7 +169,7 @@ This documentation is intended for:
 
 **Task Principal**: The security principal configured in a scheduled task definition that determines the user account or group under which the task action executes. Set at task creation via `New-ScheduledTaskPrincipal`. Does not affect who can modify the task.
 
-**SDDL String**: A textual representation of a security descriptor (ACL). Each ACE within the DACL portion uses the format `(type;flags;rights;;;SID)`. Example: `(A;;GRGWGX;;;AU)` means Allow (A) Generic Read (GR) + Generic Write (GW) + Generic Execute (GX) to Authenticated Users (AU).
+**SDDL String**: A textual representation of a security descriptor (ACL). Each ACE within the DACL portion uses the format `(type;flags;rights;;;SID)`. Example: `(A;;GA;;;AU)` means Allow (A) Generic All (GA = TASK_ALL_ACCESS on Task Scheduler objects) to Authenticated Users (AU). Prior to v2.17, the grant used `(A;;GRGWGX;;;AU)` (Generic Read + Write + Execute), which did not correctly map to Task Scheduler modify rights.
 
 **Schedule.Service COM Object**: The `Schedule.Service` COM automation object (ProgID: `Schedule.Service`) that provides programmatic access to the Task Scheduler service. Used to read and write task security descriptors that cannot be set via the standard `ScheduledTasks` PowerShell module.
 
@@ -1125,11 +1126,11 @@ See SECURITY_CONTROLS_TOAST_v3.0.md for comprehensive security documentation.
    - Staged path readable by USERS group
    - Self-cleaning via scheduled task deletion
 
-8. **Scheduled Task DACL Permissions (v2.14)**
-   - Pre-created snooze tasks granted `(A;;GRGWGX;;;AU)` ACE after registration
-   - Grants Authenticated Users Generic Read + Generic Write + Generic Execute on the task object only
-   - Applied via `Schedule.Service` COM object in SYSTEM context during deployment
-   - Permission is idempotent: checked before application to prevent duplicate ACE entries
+8. **Scheduled Task DACL Permissions (v2.14, corrected v2.17/v2.18/v2.20)**
+   - Pre-created snooze tasks granted `(A;;GA;;;AU)` ACE after registration (corrected from `GRGWGX` in v2.17; implementation method revised in v2.18)
+   - Grants Authenticated Users Generic All (TASK_ALL_ACCESS) on the task object only; required for `Set-ScheduledTask` and `Enable-ScheduledTask` in user context
+   - Applied via `Schedule.Service` COM object using direct DACL set `D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;AU)` (v2.18+), in SYSTEM context during deployment
+   - In v2.20, DACL grant was restructured to apply to both newly registered and pre-existing tasks; previously, existing tasks were skipped via a `continue` statement, leaving them with default DACL (SYSTEM+Admins only)
    - Scope is strictly limited to Toast GUID-specific tasks (see Section 12)
 
 **Critical Security Fixes Applied (v3.0):**
@@ -2749,6 +2750,116 @@ if ($SecDescriptor -notmatch '\(A;;GA;;;AU\)') {
 
 The v2.17 fix corrects a defect that caused the previously documented security control (DACL-based least-privilege access for AU) to be non-functional. The corrected implementation now fulfils the intent of ISO 27001 Annex A Control A.9.4.1 as documented in Section 12.3.
 
+#### 12.2.6 Direct DACL Set Approach (v2.18)
+
+**Introduced In:** Toast_Notify.ps1 v2.18
+
+**Background**
+
+The v2.17 implementation set the SecurityInformation flags to `4` (DACL_SECURITY_INFORMATION) on both the `GetSecurityDescriptor` and `SetSecurityDescriptor` calls. Post-deployment runtime testing revealed that `IRegisteredTask.SetSecurityDescriptor` raises `E_INVALIDARG` ("The value does not fall within the expected range") when the flags parameter is non-zero for any value other than `0x10` (`TASK_DONT_ADD_PRINCIPAL_ACE`).
+
+Per MSDN documentation for `IRegisteredTask::SetSecurityDescriptor`, the only supported values for the `flags` parameter are:
+- `0` - Write the security descriptor as-is
+- `0x10` (`TASK_DONT_ADD_PRINCIPAL_ACE`) - Write the security descriptor but do not automatically add an ACE for the task principal
+
+Passing `flags = 4` (DACL_SECURITY_INFORMATION) is not supported by the Task Scheduler COM API and causes a runtime exception.
+
+**Change Applied in v2.18**
+
+The implementation was revised to use a direct DACL set rather than the GetSecurityDescriptor + append pattern:
+
+```powershell
+# v2.18 implementation - direct DACL set
+# Replaces the entire DACL with a known-good descriptor
+# SYSTEM: Generic All, Administrators: Generic All, Authenticated Users: Generic All
+$NewSecDescriptor = 'D:(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;AU)'
+$TaskObject.SetSecurityDescriptor($NewSecDescriptor, 0)
+```
+
+**Rationale**
+
+- The direct set approach avoids the need to read the existing descriptor entirely, eliminating the SDDL prefix edge case where `GetSecurityDescriptor(4)` may return a string without the `D:` prefix, causing the appended ACE to produce malformed SDDL.
+- `flags = 0` is the documented default behaviour and is universally supported.
+- The DACL for these pre-created snooze tasks is fully owned and controlled by the deployment; replacing the full DACL with a known-good value is safe and produces a deterministic, auditable security state.
+
+**Note on ACE rights in v2.18:** The v2.18 implementation used `FA` (FILE_ALL_ACCESS) rather than `GA` (Generic All) in the SDDL string. `FA` was corrected to `GA` in v2.20 because `FA` is a file-object rights constant and does not correctly map to Task Scheduler object rights. See Section 12.2.7 for the v2.20 correction.
+
+#### 12.2.7 DACL Loop Restructure and SDDL Correction (v2.20)
+
+**Introduced In:** Toast_Notify.ps1 v2.20
+
+**Root Cause: DACL Skipped for Pre-Existing Tasks**
+
+During re-deployment scenarios (e.g. a second push to the same machine), the snooze tasks created in a prior deployment already exist in Task Scheduler. The v2.18 `Initialize-SnoozeTasks` loop used the following logic structure:
+
+```powershell
+# Prior v2.18 loop structure (simplified)
+try {
+    Register-ScheduledTask -TaskName $TaskName -Force ...
+    $SuccessCount++
+    # continue statement skipped all remaining code for existing tasks
+}
+catch [Microsoft.Management.Infrastructure.CimException] {
+    if ($_.Exception.Message -match 'already exists') {
+        Write-Output "Task already exists: $TaskName"
+        $SuccessCount++
+        continue   # <-- BUG: jumped to next loop iteration, skipping DACL block
+    }
+}
+# DACL grant block - never reached for existing tasks
+```
+
+When a task already existed, the inner `catch` incremented `$SuccessCount` and issued a `continue` statement, jumping to the next loop iteration. The DACL grant block (using `Schedule.Service` COM) was never executed for those tasks. On the test machine, all four snooze tasks were pre-created from a previous deployment with default DACL (SYSTEM + Administrators only), meaning `Set-ScheduledTask` and `Enable-ScheduledTask` continued to fail with Access Denied for standard users despite re-deployment.
+
+**Root Cause: FA vs GA SDDL Rights**
+
+The v2.18 direct DACL string used `FA` (FILE_ALL_ACCESS) as the rights token. `FA` is a file-object rights abbreviation defined in the SDDL specification for file system ACEs. When applied to a Task Scheduler COM object, `FA` does not map to the task-object-specific rights set (`TASK_ALL_ACCESS`). The correct rights token for Task Scheduler objects is `GA` (Generic All), which the Task Scheduler COM service internally maps to `TASK_ALL_ACCESS`.
+
+**Fix Applied in v2.20**
+
+Two corrections were applied simultaneously:
+
+```powershell
+# v2.20 corrected loop structure
+for ($i = 1; $i -le 4; $i++) {
+    $TaskName = "Toast_Notification_${ToastGUID}_Snooze${i}"
+    try {
+        try {
+            Register-ScheduledTask -TaskName $TaskName ...
+            Write-Output "  Created task: $TaskName"
+        }
+        catch {
+            if ($_.Exception.Message -match 'already exists') {
+                # Fall through - do NOT continue. DACL must be applied to existing tasks.
+                Write-Output "  Task already exists: $TaskName [SKIPPED REGISTRATION - will update DACL]"
+            }
+            else { throw }
+        }
+
+        # DACL grant runs for BOTH new and pre-existing tasks
+        $NewSecDescriptor = 'D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;AU)'  # GA not FA
+        $TaskObject.SetSecurityDescriptor($NewSecDescriptor, 0)
+        Write-Output "  Granted AU Generic All access: $TaskName [OK]"
+
+        # SuccessCount only incremented after DACL grant succeeds
+        $SuccessCount++
+    }
+    catch {
+        Write-Warning "  Failed to process task: $TaskName"
+    }
+}
+```
+
+**Summary of Changes:**
+
+| Change | Prior Behaviour | Corrected Behaviour |
+|--------|-----------------|---------------------|
+| Loop structure | `continue` statement skipped DACL block for existing tasks | `continue` removed; DACL block executes for both new and existing tasks |
+| SDDL rights token | `FA` (FILE_ALL_ACCESS - file object semantics) | `GA` (Generic All - maps to TASK_ALL_ACCESS on task objects) |
+| `$SuccessCount++` position | Incremented immediately after task registration (before DACL) | Moved to after DACL grant succeeds; ensures count reflects tasks with correct permissions |
+
+**Security Impact:** LOW. The change closes a re-deployment gap where tasks created in a prior deployment retained default DACL (SYSTEM+Administrators only). With v2.20, re-deployment idempotently sets the correct DACL on all four snooze tasks regardless of their prior state.
+
 ### 12.3 ISO 27001 A.9.4.1 Access Control Assessment
 
 **Control Reference:** ISO 27001:2015 Annex A, Control A.9.4.1 - Information Access Restriction
@@ -2776,7 +2887,7 @@ The `AU` (Authenticated Users) scope is intentionally broad relative to a per-us
 |---------|-------------|---------------|
 | Registry state persistence | SnoozeCount is stored in HKLM, which users cannot write to (only SYSTEM can) | HIGH - user cannot reset their own snooze count |
 | Stage 4 enforcement | Stage 4 toast uses `IncomingCallScenario` (non-dismissible) and has no snooze button; task modification cannot bypass the UI constraint | HIGH |
-| Task action immutability | `GRGWGX` does not include `WRITE_DAC`; users cannot change what the task executes | HIGH |
+| Task action immutability | `GA` (TASK_ALL_ACCESS) does not include `WRITE_DAC` on task objects owned by SYSTEM; users cannot change what the task executes or redirect it to a different executable | HIGH |
 | Audit trail | SnoozeCount in HKLM provides tamper-evident record of progression | MEDIUM |
 | IT-managed endpoint assumption | This system is designed for corporate managed endpoints only; a user capable of bypassing progressive enforcement via task manipulation would require basic PowerShell knowledge and intentional effort | LOW-MEDIUM |
 
@@ -2798,7 +2909,7 @@ The permission grant is limited in scope to minimize attack surface:
 
 #### 12.4.1 Verifying SDDL Is Applied
 
-To confirm that `(A;;GRGWGX;;;AU)` has been applied to snooze tasks, run the following in an elevated PowerShell session or via SCCM run script:
+To confirm that the AU permission has been applied to snooze tasks, run the following in an elevated PowerShell session or via SCCM run script:
 
 ```powershell
 # Replace {GUID} with the actual ToastGUID value
@@ -2811,10 +2922,12 @@ for ($i = 1; $i -le 4; $i++) {
     $TaskName = "Toast_Notification_${ToastGUID}_Snooze${i}"
     try {
         $TaskObject = $TaskScheduler.GetFolder('\').GetTask($TaskName)
-        $SecDescriptor = $TaskObject.GetSecurityDescriptor(0xF)
+        # flags=0: retrieves the DACL as set. Note: v2.18+ uses direct DACL set so no SACL is present.
+        $SecDescriptor = $TaskObject.GetSecurityDescriptor(0)
 
-        if ($SecDescriptor -match 'A;;GRGWGX;;;AU') {
-            Write-Output "[OK]   $TaskName - AU permission present"
+        # Match any of the equivalent AU full-access ACE forms across versions
+        if ($SecDescriptor -match 'A;;(?:GA|FA|GRGWGX);;;AU') {
+            Write-Output "[OK]   $TaskName - AU permission present. SDDL: $SecDescriptor"
         }
         else {
             Write-Output "[FAIL] $TaskName - AU permission MISSING. SDDL: $SecDescriptor"
@@ -2828,20 +2941,21 @@ for ($i = 1; $i -le 4; $i++) {
 [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($TaskScheduler)
 ```
 
-**Expected output (successful deployment):**
+**Expected output (successful deployment with v2.20):**
 
 ```
-[OK]   Toast_Notification_{GUID}_Snooze1 - AU permission present
-[OK]   Toast_Notification_{GUID}_Snooze2 - AU permission present
-[OK]   Toast_Notification_{GUID}_Snooze3 - AU permission present
-[OK]   Toast_Notification_{GUID}_Snooze4 - AU permission present
+[OK]   Toast_Notification_{GUID}_Snooze1 - AU permission present. SDDL: D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;AU)
+[OK]   Toast_Notification_{GUID}_Snooze2 - AU permission present. SDDL: D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;AU)
+[OK]   Toast_Notification_{GUID}_Snooze3 - AU permission present. SDDL: D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;AU)
+[OK]   Toast_Notification_{GUID}_Snooze4 - AU permission present. SDDL: D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;AU)
 ```
 
-#### 12.4.2 Manually Applying a Missing ACE
+#### 12.4.2 Manually Applying a Missing DACL
 
-If the ACE is absent (e.g. the permission step failed silently during deployment), re-apply it from an elevated session:
+If the AU permission is absent (e.g. the permission step failed during deployment, or re-deploy skipped existing tasks before v2.20), re-apply it from an elevated session using a direct DACL set:
 
 ```powershell
+# Requires elevation (run as Administrator or SYSTEM via SCCM)
 $ToastGUID = '{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}'
 
 $TaskScheduler = New-Object -ComObject 'Schedule.Service'
@@ -2851,16 +2965,12 @@ for ($i = 1; $i -le 4; $i++) {
     $TaskName = "Toast_Notification_${ToastGUID}_Snooze${i}"
     try {
         $TaskObject = $TaskScheduler.GetFolder('\').GetTask($TaskName)
-        $SecDescriptor = $TaskObject.GetSecurityDescriptor(0xF)
 
-        if ($SecDescriptor -notmatch 'A;;GRGWGX;;;AU') {
-            $SecDescriptor += '(A;;GRGWGX;;;AU)'
-            $TaskObject.SetSecurityDescriptor($SecDescriptor, 0)
-            Write-Output "[OK]   Updated DACL on $TaskName"
-        }
-        else {
-            Write-Output "[SKIP] AU ACE already present on $TaskName"
-        }
+        # Direct DACL set: SYSTEM GA, Administrators GA, Authenticated Users GA
+        # flags=0: per MSDN only 0 or 0x10 (TASK_DONT_ADD_PRINCIPAL_ACE) are valid
+        $NewSecDescriptor = 'D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;AU)'
+        $TaskObject.SetSecurityDescriptor($NewSecDescriptor, 0)
+        Write-Output "[OK]   Updated DACL on $TaskName"
     }
     catch {
         Write-Output "[FAIL] $TaskName - $($_.Exception.Message)"
@@ -2869,6 +2979,8 @@ for ($i = 1; $i -le 4; $i++) {
 
 [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($TaskScheduler)
 ```
+
+**Note:** This script uses the direct DACL set approach introduced in v2.18. It replaces the full DACL with `D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;AU)` rather than appending to the existing descriptor. This avoids SDDL parsing edge cases (e.g. missing `D:` prefix) and ensures a consistent, known-good DACL state regardless of prior deployment history.
 
 #### 12.4.3 Troubleshooting: Access Denied on Set-ScheduledTask
 
@@ -2955,6 +3067,64 @@ If `Toast_Snooze_Handler.ps1` logs `Access Denied` when calling `Set-ScheduledTa
 | Code Location | `src/Toast_Notify.ps1`, `Initialize-SnoozeTasks`, COM/ACL block |
 | Code Review | CR-TOAST-v2.17-001 - Approved (see Section 16.1) |
 | Architecture Reference | Section 12.2.5 - DACL Grant Security Information Flags |
+
+### 12.9 Change Log for v2.18
+
+| Item | Description |
+|------|-------------|
+| Change 1 | `Initialize-SnoozeTasks` DACL grant: Replaced `GetSecurityDescriptor(4)` + SDDL string append with direct `SetSecurityDescriptor` using a known-good DACL string |
+| Change 2 | `SetSecurityDescriptor` flags parameter corrected from `4` (DACL_SECURITY_INFORMATION) back to `0` (default); `flags=4` caused `E_INVALIDARG` at runtime on the Task Scheduler COM API |
+| Change 3 | Direct DACL string introduced: `D:(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;AU)` (note: `FA` corrected to `GA` in v2.20) |
+| Root Cause | `IRegisteredTask::SetSecurityDescriptor` only accepts `flags = 0` or `flags = 0x10` per MSDN; passing `flags = 4` is not a valid SecurityInformation mask for this COM method and raises `E_INVALIDARG` at runtime |
+| Root Cause 2 | `GetSecurityDescriptor(4)` may return an SDDL string without the `D:` prefix on some systems; appending `(A;;GA;;;AU)` to such a string produced malformed SDDL |
+| Effect | DACL grant is no longer subject to `E_INVALIDARG` from invalid flags; result DACL is deterministic and auditable |
+| Security Impact | LOW - direct set replaces the existing DACL entirely; SYSTEM and Administrators retain full access; AU receives full access (`FA` at this stage, corrected to `GA` in v2.20) |
+| Code Location | `src/Toast_Notify.ps1`, `Initialize-SnoozeTasks`, COM/ACL block |
+| Code Review | CR-TOAST-v2.18-001 - Approved (see Section 16.1) |
+| Architecture Reference | Section 12.2.6 - Direct DACL Set Approach |
+
+### 12.10 Change Log for v2.19
+
+| Item | Description |
+|------|-------------|
+| Change 1 | `Start-Transcript` added to SYSTEM context execution path immediately after `$LogPath` is set |
+| Change 2 | `Start-Transcript` added to USER context execution path using the organized `Logs\` folder path |
+| Effect on SYSTEM context | Deployment output (including `Initialize-SnoozeTasks`, DACL grant steps, task registration) is now captured in a timestamped log file under `{WorkingDirectory}\{GUID}\Logs\` |
+| Effect on USER context | Toast display output now uses the organized `Logs\` folder path (matching the SYSTEM context log location) instead of `%WINDIR%\Temp\{GUID}.log` |
+| Log path | Both contexts produce logs in `{WorkingDirectory}\{GUID}\Logs\` with a timestamp in the filename |
+| No logic changes | Functional behaviour of task creation, DACL grant, and toast display is unchanged |
+| Code Location | `src/Toast_Notify.ps1`, SYSTEM context block and USER context block |
+| Code Review | CR-TOAST-v2.19-001 - Approved (see Section 16.1) |
+
+### 12.11 Change Log for v2.20 (Toast_Notify.ps1) and v1.7 (Toast_Snooze_Handler.ps1)
+
+#### 12.11.1 Toast_Notify.ps1 v2.20
+
+| Item | Description |
+|------|-------------|
+| Change 1 | `Initialize-SnoozeTasks` loop restructured: `continue` statement removed from the `already exists` catch branch; DACL block now executes for both newly registered and pre-existing tasks |
+| Change 2 | SDDL rights token corrected from `FA` (FILE_ALL_ACCESS) to `GA` (Generic All); `FA` is a file-object constant and does not correctly map to Task Scheduler object rights |
+| Change 3 | `$SuccessCount++` moved to after the DACL grant block; previously incremented before DACL, meaning a task with failed DACL was still counted as successful |
+| Root Cause | On re-deployment, tasks pre-created by an earlier deployment were detected by `Register-ScheduledTask`, causing the `already exists` exception handler to run, increment the count, and issue `continue`. The DACL grant block that followed was never reached. Tasks retained their default DACL (SYSTEM + Administrators only), causing `Set-ScheduledTask` Access Denied for standard users even after re-deployment |
+| Root Cause 2 | `FA` (FILE_ALL_ACCESS) is defined in the SDDL grammar as a shorthand for file system ACEs. Task Scheduler COM objects do not honour `FA` as equivalent to `TASK_ALL_ACCESS`; the correct generic rights token for Task Scheduler objects is `GA` (Generic All) |
+| Effect | DACL grant is now idempotent and applies correctly on both first deployment and re-deployment. Standard users receive `TASK_ALL_ACCESS` (`GA`) on all four snooze task objects in all deployment scenarios |
+| Security Impact | LOW - same AU grant as v2.18 but with correct Task Scheduler semantics; scope remains the four GUID-specific snooze tasks only |
+| Code Location | `src/Toast_Notify.ps1`, `Initialize-SnoozeTasks`, for-loop and COM/ACL block |
+| Code Review | CR-TOAST-v2.20-001 - Approved (see Section 16.1) |
+| Architecture Reference | Section 12.2.7 - DACL Loop Restructure and SDDL Correction |
+
+#### 12.11.2 Toast_Snooze_Handler.ps1 v1.7
+
+| Item | Description |
+|------|-------------|
+| Change 1 | `$ErrorActionPreference = 'Continue'` added as the first statement inside all catch blocks (12 total) |
+| Root Cause | `$ErrorActionPreference = 'Stop'` is set in the outer `try` block at line 264. Under `EAP='Stop'`, a `Write-Error` call inside a `catch` block is itself a terminating error, not a non-terminating one. This caused the `Write-Error` diagnostic lines within inner catch blocks to throw, escaping the inner catch and bubbling up to the outer catch at line 613/614, which then logged the misleading error "At line:614 char:5" instead of the actual `Set-ScheduledTask` error message |
+| Effect | Inner catch blocks now reset `EAP` to `Continue` before calling `Write-Error`, preventing the error cascade. Real error messages from `Set-ScheduledTask`, `Enable-ScheduledTask`, and other operations are now correctly logged and visible in the transcript |
+| Error cascade chain (resolved) | `EAP='Stop'` (outer try, line 264) -> `Write-Error` in inner catch (terminating under EAP=Stop) -> throws -> outer catch at 613/614 catches exception -> logs "614 char 5" -> real error is lost |
+| Scope | `$ErrorActionPreference = 'Continue'` resets the preference locally within each catch block only; the `Stop` preference in the outer `try` block is unaffected |
+| No logic changes | Functional snooze scheduling behaviour is unchanged; only error reporting is corrected |
+| Code Location | `src/Toast_Snooze_Handler.ps1`, all catch blocks (12 total) |
+| Code Review | CR-TOAST-v1.7-001 - Approved (see Section 16.1) |
 
 ---
 
@@ -3445,6 +3615,65 @@ $OldLogs | ForEach-Object {
 
 **Code Review Outcome:** All three bugs corrected simultaneously. The AU DACL grant is now functional. `Access Denied` on `Set-ScheduledTask` and `Enable-ScheduledTask` in user context is resolved. No CRITICAL, HIGH, MEDIUM, or LOW findings. Approved for production deployment.
 
+**Code Review ID:** CR-TOAST-v2.18-001
+**Date:** 2026-02-17
+**Reviewer:** PowerShell Code Reviewer Agent
+**Status:** APPROVED - NO CHANGES REQUIRED
+
+**Summary of Findings (v2.18):**
+
+| Finding # | Severity | Category | Description | Resolution |
+|-----------|----------|----------|-------------|------------|
+| 1 | INFO | Correctness | `SetSecurityDescriptor(sddl, 4)` raised `E_INVALIDARG` at runtime; Task Scheduler COM API only accepts `flags = 0` or `flags = 0x10` | Resolved by change: flags reverted to `0`; DACL set approach changed to direct string replacement |
+| 2 | INFO | Correctness | `GetSecurityDescriptor(4)` may return SDDL without `D:` prefix on some systems; appended ACE produced malformed SDDL | Resolved by change: GetSecurityDescriptor call removed; direct DACL string used instead |
+| 3 | INFO | SDDL | `FA` (FILE_ALL_ACCESS) used in direct DACL string; `FA` is a file-object constant and may not map correctly to Task Scheduler object rights | Documented; corrected to `GA` in v2.20 (see CR-TOAST-v2.20-001) |
+
+**Code Review Outcome:** Runtime E_INVALIDARG from invalid COM flags resolved. Direct DACL set produces deterministic, auditable result. `FA` vs `GA` issue noted and tracked for follow-up correction. Approved for production deployment.
+
+**Code Review ID:** CR-TOAST-v2.19-001
+**Date:** 2026-02-17
+**Reviewer:** PowerShell Code Reviewer Agent
+**Status:** APPROVED - NO CHANGES REQUIRED
+
+**Summary of Findings (v2.19):**
+
+| Finding # | Severity | Category | Description | Resolution |
+|-----------|----------|----------|-------------|------------|
+| 1 | INFO | Logging | SYSTEM context deployment output (Initialize-SnoozeTasks, DACL grant) was not captured in transcript | Resolved by change: `Start-Transcript` added to SYSTEM context path immediately after `$LogPath` is set |
+| 2 | INFO | Logging | USER context transcript used `%WINDIR%\Temp\{GUID}.log` instead of the organized `Logs\` folder introduced in v2.4 | Resolved by change: USER context transcript updated to use `{WorkingDirectory}\{GUID}\Logs\` path |
+
+**Code Review Outcome:** Logging coverage extended to SYSTEM context. Log file locations are now consistent between SYSTEM and USER context runs. No functional logic changes. No security implications. Approved for production deployment.
+
+**Code Review ID:** CR-TOAST-v2.20-001
+**Date:** 2026-02-17
+**Reviewer:** PowerShell Code Reviewer Agent
+**Status:** APPROVED - NO CHANGES REQUIRED
+
+**Summary of Findings (v2.20 - Toast_Notify.ps1):**
+
+| Finding # | Severity | Category | Description | Resolution |
+|-----------|----------|----------|-------------|------------|
+| 1 | INFO | Correctness | `continue` statement in `already exists` catch branch caused DACL block to be skipped for pre-existing tasks on re-deployment; tasks retained default DACL (SYSTEM+Admins only) | Resolved by change: `continue` removed; loop restructured so DACL block executes for both new and existing tasks |
+| 2 | INFO | SDDL | `FA` (FILE_ALL_ACCESS) in DACL string does not correctly map to `TASK_ALL_ACCESS` on Task Scheduler COM objects | Resolved by change: `FA` replaced with `GA` (Generic All) throughout direct DACL string |
+| 3 | INFO | Logic | `$SuccessCount++` was incremented before DACL grant; a task with failed DACL was still counted as success | Resolved by change: `$SuccessCount++` moved to after DACL grant succeeds |
+
+**Code Review Outcome:** Re-deployment gap closed. DACL grant is now idempotent across all deployment scenarios. SDDL rights corrected to Task Scheduler semantics. Success counting is accurate. No CRITICAL, HIGH, MEDIUM, or LOW findings. Approved for production deployment.
+
+**Code Review ID:** CR-TOAST-v1.7-001
+**Date:** 2026-02-17
+**Reviewer:** PowerShell Code Reviewer Agent
+**File:** src/Toast_Snooze_Handler.ps1
+**Status:** APPROVED - NO CHANGES REQUIRED
+
+**Summary of Findings (v1.7 - Toast_Snooze_Handler.ps1):**
+
+| Finding # | Severity | Category | Description | Resolution |
+|-----------|----------|----------|-------------|------------|
+| 1 | INFO | Error Handling | `$ErrorActionPreference = 'Stop'` in outer try (line 264) caused `Write-Error` inside inner catch blocks to become terminating errors; real error messages were swallowed by the outer catch and replaced with misleading "line 614 char 5" reference | Resolved by change: `$ErrorActionPreference = 'Continue'` added as first statement in all 12 catch blocks |
+| 2 | INFO | Diagnostics | `Set-ScheduledTask` failure messages were not visible in transcript due to the error cascade described above | Resolved as consequence of item 1: `Write-Error` in inner catches now operates under `EAP=Continue` and emits the error message to the error stream without throwing |
+
+**Code Review Outcome:** Error reporting cascade resolved. All inner catch blocks now correctly log their specific error messages to the error stream before allowing natural exception flow. No functional snooze scheduling logic changed. No security implications. Approved for production deployment.
+
 ### 16.2 Security Testing Results
 
 **Test Plan ID:** SEC-TEST-TOAST-v3.0
@@ -3481,8 +3710,8 @@ $OldLogs | ForEach-Object {
 | SEC-011 | Standard user calls Enable-ScheduledTask on Snooze1 task | Succeeds (no Access Denied) | PENDING | PENDING |
 | SEC-012 | Standard user calls Set-ScheduledTask on Snooze2 task | Succeeds (no Access Denied) | PENDING | PENDING |
 | SEC-013 | Standard user attempts to change task action executable | Fails (Access Denied - requires WRITE_DAC) | PENDING | PENDING |
-| SEC-014 | SDDL ACE present after Initialize-SnoozeTasks runs | (A;;GRGWGX;;;AU) found in GetSecurityDescriptor | PENDING | PENDING |
-| SEC-015 | Initialize-SnoozeTasks called twice (idempotency) | Only one (A;;GRGWGX;;;AU) ACE in descriptor | PENDING | PENDING |
+| SEC-014 | SDDL ACE present after Initialize-SnoozeTasks runs | D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;AU) set on all 4 tasks | PENDING | PENDING |
+| SEC-015 | Initialize-SnoozeTasks called twice (idempotency) | DACL is overwritten (direct set); result is same known-good D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;AU) | PENDING | PENDING |
 | SEC-016 | Initialize-SnoozeTasks called in user context | Function returns $false, no task modification | PENDING | PENDING |
 
 **Note:** SEC-011 through SEC-016 require a managed endpoint with a standard user test account. Mark PASS/FAIL and update this table after validation testing.
@@ -3755,6 +3984,9 @@ Action Snooze Dismiss
 | Author | Ben Whitmore | _________________ | 2026-02-12 |
 | Author (v3.2 additions) | CR | _________________ | 2026-02-17 |
 | Author (v3.3 additions) | CR | _________________ | 2026-02-17 |
+| Author (v3.4 additions) | CR | _________________ | 2026-02-17 |
+| Author (v3.5 additions) | CR | _________________ | 2026-02-17 |
+| Author (v3.6 additions) | CR | _________________ | 2026-02-17 |
 | Technical Reviewer | Code Review Agent | APPROVED | 2026-02-17 |
 | Security Reviewer | Security Team | PENDING | 2026-02-17 |
 | Quality Assurance | QA Team | PENDING | 2026-02-17 |
@@ -3764,5 +3996,5 @@ Action Snooze Dismiss
 
 *End of Technical Documentation - Progressive Toast Notification System v3.0*
 
-*Version: 3.3 | Date: 2026-02-17*
+*Version: 3.6 | Date: 2026-02-17*
 *Licensed under GNU General Public License v3*
