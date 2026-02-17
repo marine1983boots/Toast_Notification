@@ -5,6 +5,13 @@ Created by:   Ben Whitmore
 Filename:     Toast_Notify.ps1
 ===========================================================================
 
+Version 2.15 - 17/02/2026
+-Auto-delete expired tasks: Changed -Compatibility V1 to Win8 (snooze + main task)
+-Added -DeleteExpiredTaskAfter (30 days) to both task settings
+-OS self-cleans task entries 30 days after all triggers expire
+-V1 was incompatible with DeleteExpiredTaskAfter (XML error 0x8004131F on corporate machines)
+-Toast notifications require Windows 10 minimum; Win8 schema compatibility is correct for all targets
+
 Version 2.14 - 17/02/2026
 -FIX: Grant Authenticated Users (AU) read/write/execute on each pre-created snooze task
 -Uses Schedule.Service COM object to append (A;;GRGWGX;;;AU) to task security descriptor
@@ -483,11 +490,12 @@ function Initialize-SnoozeTasks {
             # Create principal (USERS group - allows all users to modify)
             $Task_Principal = New-ScheduledTaskPrincipal -GroupId "S-1-5-32-545" -RunLevel Limited
 
-            # Create settings (task disabled by default, no trigger)
+            # Create settings (task disabled by default, no trigger, auto-delete 30 days after expiry)
             $Task_Settings = New-ScheduledTaskSettingsSet `
-                -Compatibility V1 `
+                -Compatibility Win8 `
                 -AllowStartIfOnBatteries `
                 -DontStopIfGoingOnBatteries `
+                -DeleteExpiredTaskAfter (New-TimeSpan -Days 30) `
                 -Disable
 
             # Create task (no trigger - will be set by snooze handler)
@@ -1561,7 +1569,11 @@ If ($XMLValid -eq $True) {
         $Task_Trigger = New-ScheduledTaskTrigger -Once -At $Task_TimeToRun
         $Task_Trigger.EndBoundary = $Task_Expiry
         $Task_Principal = New-ScheduledTaskPrincipal -GroupId "S-1-5-32-545" -RunLevel Limited
-        $Task_Settings = New-ScheduledTaskSettingsSet -Compatibility V1 -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+        $Task_Settings = New-ScheduledTaskSettingsSet `
+            -Compatibility Win8 `
+            -AllowStartIfOnBatteries `
+            -DontStopIfGoingOnBatteries `
+            -DeleteExpiredTaskAfter (New-TimeSpan -Days 30)
         $New_Task = New-ScheduledTask -Description "Toast_Notification_$($ToastGuid) Task for user notification. Title: $($EventTitle) :: Event:$($EventText) :: Source Path: $($ToastPath) " -Action $Task_Action -Principal $Task_Principal -Trigger $Task_Trigger -Settings $Task_Settings
         Register-ScheduledTask -TaskName "Toast_Notification_$($ToastGuid)" -InputObject $New_Task
     }
