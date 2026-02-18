@@ -8,6 +8,13 @@
     When invoked from a -Snooze toast, also cleans up registry state and scheduled tasks
     for this toast GUID before rebooting.
 
+    Version 1.4 - 18/02/2026
+    -FIX: Replace Remove-Item with Set-ItemProperty Completed=1 for HKLM registry cleanup
+    -User context cannot delete HKLM keys (KEY_WRITE required on parent, intentionally blocked)
+    -Writing Completed=1 value IS permitted (user has FullControl on GUID key via Grant-RegistryPermissions)
+    -Toast_Notify.ps1 v2.32 checks Completed=1 before display and exits early
+    -SYSTEM context cleanup removes completed keys on next deployment
+
     Version 1.3 - 18/02/2026
     -Cancel fallback task (Toast_Notification_{GUID}_{Username}_Fallback) during cleanup
     -Fallback task is pre-scheduled by Toast_Notify.ps1 v2.26 before the toast is shown
@@ -88,19 +95,23 @@ try {
 
                 Write-Output "Cleaning up toast registry state and scheduled tasks..."
 
-                # 1. Remove registry state for this toast GUID
+                # 1. Mark registry state as Completed=1
+                # Cannot delete HKLM key from user context (requires KEY_WRITE on parent, which is intentionally blocked).
+                # Writing a value to the key IS permitted (user has FullControl on GUID key via Grant-RegistryPermissions).
+                # Toast_Notify.ps1 checks Completed=1 before display and exits early. SYSTEM context cleanup removes
+                # orphaned Completed keys on next deployment.
                 $RegKeyPath = "${RegistryHive}:\${RegistryPath}\$ToastGUID"
                 try {
                     if (Test-Path $RegKeyPath) {
-                        Remove-Item -Path $RegKeyPath -Recurse -Force -ErrorAction Stop
-                        Write-Output "[OK] Registry state removed: $RegKeyPath"
+                        Set-ItemProperty -Path $RegKeyPath -Name "Completed" -Value 1 -Type DWord -Force -ErrorAction Stop
+                        Write-Output "[OK] Registry state marked Completed=1: $RegKeyPath"
                     }
                     else {
                         Write-Output "[INFO] Registry key not found (already removed or not created): $RegKeyPath"
                     }
                 }
                 catch {
-                    Write-Warning "Could not remove registry key: $($_.Exception.Message)"
+                    Write-Warning "Could not mark registry key as completed: $($_.Exception.Message)"
                     Write-Warning "Continuing with reboot - registry cleanup non-fatal"
                 }
 

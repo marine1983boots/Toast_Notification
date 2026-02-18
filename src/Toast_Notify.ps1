@@ -5,6 +5,15 @@ Created by:   Ben Whitmore
 Filename:     Toast_Notify.ps1
 ===========================================================================
 
+Version 2.32 - 18/02/2026
+-FIX: HKLM registry cleanup failure after Reboot/Dismiss button click
+-Handlers (v1.4/v1.2) now write Completed=1 value instead of deleting the key
+ (user context lacks KEY_WRITE on parent key, making Remove-Item fail with Access Denied)
+-USER context: Added Completed=1 check before display - exits early if flag is set
+ (prevents toast reappearing after reboot when user already acted)
+-SYSTEM context: Added orphan cleanup pass before Initialize-ToastRegistry
+ (deletes GUID keys with Completed=1 on each new deployment)
+
 Version 2.31 - 18/02/2026
 -FallbackAdvanceStage now always passes -AdvanceStage to fallback tasks (Stages 0-2 previously
  re-fired at same stage indefinitely; users who ignored toasts would never reach Stage 4)
@@ -1500,6 +1509,25 @@ If ($XMLValid -eq $True) {
 
         #Initialize Registry State if snooze mode enabled
         If ($Snooze) {
+
+            # Cleanup pass: Delete any previously completed toast keys (Completed=1 set by user handlers)
+            # User context cannot delete HKLM keys; SYSTEM context can. Runs on each new deployment.
+            $CleanupBasePath = "HKLM:\${RegistryPath}"
+            if (Test-Path $CleanupBasePath) {
+                try {
+                    Get-ChildItem -Path $CleanupBasePath -ErrorAction SilentlyContinue | ForEach-Object {
+                        $CompletedState = Get-ItemProperty -Path $_.PSPath -ErrorAction SilentlyContinue
+                        if ($CompletedState -and $CompletedState.Completed -eq 1) {
+                            Remove-Item -Path $_.PSPath -Recurse -Force -ErrorAction SilentlyContinue
+                            Write-Output "[OK] SYSTEM cleanup: Removed completed toast key: $($_.PSChildName)"
+                        }
+                    }
+                }
+                catch {
+                    Write-Warning "Completed key cleanup scan failed (non-fatal): $($_.Exception.Message)"
+                }
+            }
+
             Write-Output "Initializing registry for ToastGUID: $ToastGUID"
             $RegInitResult = Initialize-ToastRegistry -ToastGUID $ToastGUID -RegistryHive $RegistryHive -RegistryPath $RegistryPath
             if (!$RegInitResult) {
@@ -1777,6 +1805,14 @@ If ($XMLValid -eq $True) {
             if ($RegState) {
                 $SnoozeCount = $RegState.SnoozeCount
                 Write-Output "Registry SnoozeCount: $SnoozeCount (Source: Registry)"
+
+                # Exit without displaying if reboot/dismiss was already taken (Completed flag set by handler)
+                # Prevents toast reappearing after reboot when HKLM key deletion failed from user context.
+                if ($RegState.Completed -eq 1) {
+                    Write-Output "[OK] Toast $ToastGUID is marked Completed - user action already taken. Exiting without display."
+                    Stop-Transcript
+                    exit 0
+                }
             }
             else {
                 Write-Warning "Registry state not found for ToastGUID: $ToastGUID - using default SnoozeCount: 0"
