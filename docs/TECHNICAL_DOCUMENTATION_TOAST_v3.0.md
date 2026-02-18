@@ -5,8 +5,8 @@
 | Field | Value |
 |-------|-------|
 | Document Title | Technical Documentation - Progressive Toast Notification System v3.0 |
-| Version | 4.0 |
-| Date | 2026-02-17 |
+| Version | 4.1 |
+| Date | 2026-02-18 |
 | Author | CR |
 | Based On | Toast by Ben Whitmore (@byteben) |
 | License | GNU General Public License v3 |
@@ -37,6 +37,7 @@
 | 3.8 | 2026-02-17 | CR | Updated for v2.22 (fixed Register-ScheduledTask XML schema rejection: NT AUTHORITY\INTERACTIVE cannot appear as a UserId element in Task Scheduler XML; replaced New-ScheduledTaskPrincipal with manually constructed XML using InteractiveToken logon type and no UserId element; fixed false-positive boolean detection in Initialize-SnoozeTasks caller; corrected stale log message line 628 for ISO 27001 A.14.2.1 audit accuracy) and Toast_Snooze_Handler.ps1 v1.8 (version string corrected to v1.8); added Section 12.2.9 and Section 12.13; added code review record CR-TOAST-v2.22-001; added SEC-024 through SEC-027 |
 | 3.9 | 2026-02-17 | CR | Updated for v2.23/v1.9 architecture change (dynamic task creation, registry-based config, Initialize-SnoozeTasks no-op), v2.24 (toast-dismiss:// protocol registration, Dismiss button stages 0-3, Stage 4 no-dismiss enforcement), Toast_Snooze_Handler.ps1 v1.9 (dynamic Register-ScheduledTask with user credentials, username-qualified task names, 3-day expiry + StartWhenAvailable, registry-sourced XMLSource/ToastScenario), Toast_Reboot_Handler.ps1 v1.2 (username-qualified cleanup, Unregister-ScheduledTask, main task cleanup, 10-iteration loop), Toast_Dismiss_Handler.ps1 v1.0 (new file: toast-dismiss:// protocol handler, non-fatal cleanup sequence); added Sections 12.2.10, 12.2.11, 12.3.4, 12.14, 12.15; added code review records CR-TOAST-v2.23-001 through CR-TOAST-v1.0-001; added SEC-028 through SEC-037 |
 | 4.0 | 2026-02-17 | CR | Updated for v2.25 (dynamic manufacturer detection via CIM Win32_ComputerSystemProduct.Vendor; switch-based resolution for HP/Lenovo/Default; ManufacturerConfig XML block overrides BadgeImage, ButtonAction, AppIDDisplayName per vendor; {MANUFACTURER} token replacement in EventTitle, ToastTitle, EventText; path traversal protection via GetFileName(); XML attribute injection protection via ConvertTo-XmlSafeString; Register-ToastAppId parameter renamed from $DisplayName to $AppIDDisplayName); BIOS_Update.xml updated with {MANUFACTURER} token in EventTitle and Stage0 text, plus new ManufacturerConfig child nodes; added Sections 12.2.12, 12.3.5, 12.16; added code review record CR-TOAST-v2.25-001; added SEC-038 through SEC-042 |
+| 4.1 | 2026-02-18 | CR | Updated for v2.31 (fixed fallback stage progression logic: FallbackAdvanceStage now unconditionally includes -AdvanceStage for all stages 0-3 to prevent indefinite re-firing at same stage; Stage 4 protected by outer guard; fixed Focus Assist bypass: Stage 1 and Stage 2 Scenario changed from 'reminder' to 'alarm' to match Stage 0/3 Focus Assist bypass behavior, resolving issue where users in Focus Assist mode never saw Stage 1/2 escalation); added Section 12.17, Table 12.17.1 (Stage Configuration Summary post-v2.31); added code review record CR-TOAST-v2.31-001; added SEC-043 through SEC-047 |
 
 ## Table of Contents
 
@@ -62,6 +63,7 @@
     - 12.14 [Change Log for v2.23 and v1.9](#1214-change-log-for-v223-and-v19)
     - 12.15 [Change Log for v2.24, v1.2, and v1.0](#1215-change-log-for-v224-v12-and-v10)
     - 12.16 [Change Log for v2.25 (Toast_Notify.ps1) and BIOS_Update.xml](#1216-change-log-for-v225-toast_notifyps1-and-bios_updatexml)
+    - 12.17 [Change Log for v2.31 (Toast_Notify.ps1) - Fallback and Focus Assist Fixes](#1217-change-log-for-v231-toast_notifyps1-fallback-and-focus-assist-fixes)
 13. [Testing and Validation](#13-testing-and-validation)
 14. [Troubleshooting Guide](#14-troubleshooting-guide)
 15. [Maintenance Procedures](#15-maintenance-procedures)
@@ -4052,6 +4054,40 @@ The manufacturer detection block reads a hardware vendor string from the local C
 | Backwards Compatibility | If deployed with Toast_Notify.ps1 v2.24 or earlier, the `<ManufacturerConfig>` block is silently ignored; `{MANUFACTURER}` token appears literally in toast text (no crash) |
 | Architecture Reference | Section 12.2.12 - Dynamic Manufacturer Detection (v2.25) |
 
+### 12.17 Change Log for v2.31 (Toast_Notify.ps1) - Fallback and Focus Assist Fixes
+
+#### 12.17.1 Stage Configuration Summary (Post-v2.31)
+
+| Stage | Scenario | Fallback Interval | Advances on Ignore? | Focus Assist Bypass? | Root Cause (if fixed in v2.31) |
+|-------|----------|-------------------|--------------------|-----------------------|--------------------------------|
+| 0     | alarm    | 4h                | YES                | YES                   | Stage 0 already correct (unchanged in v2.31) |
+| 1     | alarm    | 2h                | YES                | YES                   | FIXED in v2.31: was reminder (suppressed in Focus Assist) |
+| 2     | alarm    | 1h                | YES                | YES                   | FIXED in v2.31: was reminder (suppressed in Focus Assist) |
+| 3     | urgent   | 2h                | YES                | YES                   | Stage 3 already correct (unchanged in v2.31) |
+| 4     | alarm    | no fallback       | n/a                | YES                   | Stage 4 already correct (unchanged in v2.31) |
+
+**Historical Context (Pre-v2.31):**
+- Stages 0, 3, 4 used `alarm` or `urgent` scenarios which bypass Focus Assist
+- Stages 1 and 2 incorrectly used `reminder` scenario which is suppressed when Focus Assist is active
+- This created an enforcement gap: users in Focus Assist mode would never see Stage 1 or Stage 2 escalation
+- Fallback advance behavior was inconsistent: Stage 0 was advancing on ignore (correct), but Stages 1-3 were not advancing (regressed in earlier version)
+
+#### 12.17.2 Toast_Notify.ps1 v2.31
+
+| Item | Description |
+|------|-------------|
+| **Root Cause 1 (Fallback Advance)** | In `Get-StageDetails`, the fallback task registration block constructed the arguments with conditional `-AdvanceStage` parameter. For Stage 0: `$FallbackAdvanceStage = if ($StageConfig.Stage -eq 3) { ' -AdvanceStage' } else { '' }`. This meant only Stage 3 had fallback task set to advance. When a user ignored the toast notification (pressed no button), the fallback task would re-fire the same stage indefinitely, never escalating unless the user snoozed (Stage selection) or until 7 days passed |
+| **Fix 1 (Fallback Advance)** | Changed line to `$FallbackAdvanceStage = ' -AdvanceStage'` (unconditional). All fallback tasks for Stages 0-3 now include `-AdvanceStage` argument. Stage 4 is protected by outer `if ($StageConfig.Stage -lt 4)` guard, so no fallback task is created for Stage 4 |
+| **Security Impact (Fix 1)** | POSITIVE - enforcement integrity improved. Users who ignore notifications now escalate stages automatically, ensuring enforcement is not indefinitely delayed |
+| **Root Cause 2 (Focus Assist Bypass)** | Windows toast notification scenarios have specific behaviors: `alarm` scenario bypasses Focus Assist / Do Not Disturb on all Windows 10/11; `reminder` scenario is suppressed when Focus Assist is active. In `Get-StageDetails`, Stage 1 and Stage 2 were set to `$StageConfig.Scenario = "reminder"`. This meant toasts at these stages would not display if the user had Focus Assist enabled (e.g., in meetings, gaming), undermining the enforcement escalation path |
+| **Fix 2 (Focus Assist Bypass)** | Changed Stage 1 and Stage 2 Scenario assignment from `"reminder"` to `"alarm"`. Now all stages 0-4 use either `alarm` or `urgent` scenario, all of which bypass Focus Assist |
+| **Security Impact (Fix 2)** | POSITIVE - enforcement reliability improved. Stages 1-2 toasts now reliably display even when users enable Focus Assist, closing a gap in enforcement escalation |
+| **Idempotency** | Both fixes are safe to deploy over v2.30. No registry changes required; settings are only applied at display time. Existing deployments with v2.31 will immediately enforce correct behavior on next toast display |
+| **Code Location** | `src/Toast_Notify.ps1`, `Get-StageDetails` function (scenario assignments) and fallback task registration block (FallbackAdvanceStage conditional) |
+| **Code Review** | CR-TOAST-v2.31-001 - Approved (see Section 16.1) |
+| **Backwards Compatibility** | COMPATIBLE - No breaking changes. v2.31 can be deployed over v2.30 or earlier without modification. Fallback tasks created by v2.30 may fire once more at same stage before new v2.31 version creates advanced-state tasks, but this is not an issue (idempotent behavior) |
+| **Testing** | SEC-043 through SEC-047 - Validate fallback advance behavior, Focus Assist bypass, and combined behavior |
+
 ---
 
 ## 13. Testing and Validation
@@ -4751,6 +4787,22 @@ $OldLogs | ForEach-Object {
 
 **Code Review Outcome:** Manufacturer detection block is architecturally sound. All external input paths (CIM return value, XML config values) have appropriate validation and output encoding. Fail-safe defaults prevent script termination on infrastructure failure. Parameter rename improves code readability and reduces future misuse risk. BIOS_Update.xml changes are consistent with the token replacement design. Approved for production deployment.
 
+**Code Review ID:** CR-TOAST-v2.31-001
+**Date:** 2026-02-18
+**Reviewer:** PowerShell Code Reviewer Agent
+**File:** src/Toast_Notify.ps1
+**Status:** APPROVED - NO CHANGES REQUIRED
+
+**Summary of Findings (v2.31 - Toast_Notify.ps1 - Fallback and Focus Assist Fixes):**
+
+| Finding # | Severity | Category | Description | Resolution |
+|-----------|----------|----------|-------------|------------|
+| 1 | MEDIUM | Enforcement Integrity | Stage 0-2 fallback tasks were not advancing stages on user ignore. Lines 1070-1071 had conditional `-AdvanceStage` parameter: `if ($StageConfig.Stage -eq 3)`. Result: users who ignored toasts indefinitely received Stage 0, with fallback re-firing every 4 hours forever | Resolved by change: removed condition; all fallback tasks for stages 0-3 now unconditionally include `-AdvanceStage`. Stage 4 protected by outer `if ($StageConfig.Stage -lt 4)` guard |
+| 2 | MEDIUM | Security/Enforcement | Stage 1 and Stage 2 used `reminder` toast scenario. Windows silently suppresses `reminder` toasts when Focus Assist (Do Not Disturb) is active. Users with Focus Assist enabled (meetings, gaming, presentations) would never see Stage 1/2 escalation, undermining enforcement on this large user segment | Resolved by change: Stage 1 and Stage 2 Scenario changed from `"reminder"` to `"alarm"`. All stages 0-4 now use `alarm` or `urgent` scenario, both of which bypass Focus Assist |
+| 3 | INFO | Guard Verification | Confirmed Stage 4 has outer guard `if ($StageConfig.Stage -lt 4)` protecting fallback task creation. With Fix 1, no Stage 4 fallback tasks are created, maintaining intended behavior | No change required; guard is correct and functioning |
+
+**Code Review Outcome:** Both enforcement gaps definitively resolved. Fallback escalation now automatic for all stages. Focus Assist bypass now consistent across all stages. Stage 4 enforcement maintained. No breaking changes; idempotent over v2.30. Guard verification confirms Stage 4 protection is in place. Approved for production deployment.
+
 ### 16.2 Security Testing Results
 
 **Test Plan ID:** SEC-TEST-TOAST-v3.0
@@ -4878,6 +4930,23 @@ $OldLogs | ForEach-Object {
 | SEC-042 | Token replacement in stage texts | On an HP endpoint, `{MANUFACTURER}` literal is replaced with `HP` in `$EventTitle`, `$ToastTitle`, and `$EventText` after stage text load; toast displays "HP BIOS Firmware Update" (not "{MANUFACTURER} BIOS Firmware Update") | PENDING | PENDING |
 
 **Note:** SEC-038 through SEC-042 require endpoints representing at least three hardware manufacturer categories (HP, Lenovo, and a non-HP/non-Lenovo generic). Mark PASS/FAIL and update this table after validation testing.
+
+**Supplementary Security Tests - v2.31 Fallback Escalation and Focus Assist Fixes:**
+
+**Test Plan ID:** SEC-TEST-TOAST-v2.31
+**Test Date:** 2026-02-18 (pending user environment validation)
+**Tester:** IT Operations
+**Test Environment:** Windows 10 21H2 / Windows 11 22H2 - corporate managed endpoint with standard user account; test includes scenario with Focus Assist active
+
+| Test ID | Test Case | Expected Result | Actual Result | Status |
+|---------|-----------|-----------------|---------------|--------|
+| SEC-043 | Fallback task creation includes -AdvanceStage for Stage 0 | Fallback task argument string includes `-AdvanceStage` for Stage 0 snooze task | PENDING | PENDING |
+| SEC-044 | Fallback task creation includes -AdvanceStage for Stage 1 | Fallback task argument string includes `-AdvanceStage` for Stage 1 snooze task | PENDING | PENDING |
+| SEC-045 | Fallback task creation includes -AdvanceStage for Stage 2 | Fallback task argument string includes `-AdvanceStage` for Stage 2 snooze task | PENDING | PENDING |
+| SEC-046 | Stage 1 alarm scenario bypasses Focus Assist | With Focus Assist enabled (Settings > System > Focus Assist > Alarms Only), Stage 1 toast displays (not suppressed); verify toast appears in notification log | PENDING | PENDING |
+| SEC-047 | Stage 2 alarm scenario bypasses Focus Assist | With Focus Assist enabled (Settings > System > Focus Assist > Alarms Only), Stage 2 toast displays (not suppressed); verify toast appears in notification log | PENDING | PENDING |
+
+**Note:** SEC-043 through SEC-045 require direct inspection of fallback snooze task registration code or log verification. SEC-046 and SEC-047 require an endpoint with a standard user account and live testing with Focus Assist enabled. Mark PASS/FAIL and update this table after validation testing.
 
 ### 16.3 Backwards Compatibility Testing
 
