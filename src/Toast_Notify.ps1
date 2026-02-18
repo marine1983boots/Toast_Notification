@@ -5,6 +5,57 @@ Created by:   Ben Whitmore
 Filename:     Toast_Notify.ps1
 ===========================================================================
 
+Version 2.31 - 18/02/2026
+-FallbackAdvanceStage now always passes -AdvanceStage to fallback tasks (Stages 0-2 previously
+ re-fired at same stage indefinitely; users who ignored toasts would never reach Stage 4)
+-Stage 1 and Stage 2 scenario changed from "reminder" to "alarm" to bypass Focus Assist
+ ("reminder" is silently suppressed by Focus Assist; "alarm" overrides on all Win10/11 configs)
+
+Version 2.30 - 18/02/2026
+-RebootCountdownMinutes now stored in HKLM registry (DWord) during SYSTEM deployment
+-RebootCountdownMinutes now included in fallback task arguments
+-Ensures configured countdown propagates through entire snooze task chain (not just initial display)
+-Mirrors XMLSource/ToastScenario registry storage pattern (v2.23)
+
+Version 2.29 - 18/02/2026
+-Stage 3 toast no longer shows generic action button (Learn More/BIOS URL)
+-Stage 3 final warning now shows Reboot Now button only (matches user expectation)
+-Stage 4 toast now includes computed reboot time in EventText (e.g. "System will reboot in 15 minutes at 14:35")
+-Countdown computed before toast display using RebootCountdownMinutes parameter
+
+Version 2.28 - 18/02/2026
+-BUG FIX: Stage 4 auto-reboot path now cleans up snooze tasks, fallback task, registry state,
+ and disables main task immediately after scheduling shutdown.exe
+-Prevents snooze tasks re-triggering toast after reboot (discovered: Snooze3 re-fired after
+ BIOS update reboot - Toast_Notification_{GUID}_{Username}_Snooze3 survived reboot)
+-Cleanup mirrors Toast_Reboot_Handler.ps1 non-fatal pattern: try-catch per operation, continue
+ on failure, Write-Warning on error
+
+Version 2.27 - 18/02/2026
+-Added -AdvanceStage switch parameter
+-When -AdvanceStage is specified with -Snooze, increments SnoozeCount in registry by 1 before
+ reading stage configuration
+-Stage 3 fallback task is now built with -AdvanceStage so when it fires it bumps SnoozeCount
+ 3->4, reads Stage 4 config, and triggers the auto-reboot countdown
+-Closes the Stage 3->Stage 4 infinite loop gap where Stage 4 (auto-reboot countdown) was
+ previously unreachable
+
+Version 2.26 - 18/02/2026
+-FIX: Pre-schedule fallback task in snooze path BEFORE showing toast
+-Closes enforcement loop gap: if user clicks Learn More, lets toast time out, or dismisses naturally
+ without clicking Snooze/Reboot/Dismiss, the fallback task fires and shows the next stage toast
+-Snooze/Reboot/Dismiss handlers each cancel this fallback task and substitute their own action
+-Fallback intervals by stage: Stage 0=4h, Stage 1=2h, Stage 2=1h, Stage 3=2h
+-Stage 4 excluded (user must make reboot decision - no fallback scheduled)
+-Fallback task name: Toast_Notification_{GUID}_{Username}_Fallback
+-Non-fatal: if fallback registration fails, logs warning and continues
+
+Version 2.25 - 18/02/2026
+-FIX: Dismiss button now hidden by default in all code paths
+-Simple notification path: Dismiss action only included when -Dismiss switch is provided
+-Snooze path: AllowDismiss gate now also requires -Dismiss switch (was always visible for Stages 0-3)
+-Correct behavior: no -Dismiss = Dismiss button hidden, -Dismiss = Dismiss button visible
+
 Version 2.24 - 17/02/2026
 -FIX: Added toast-dismiss:// protocol handler for proper dismiss cleanup
 -Dismiss button now unregisters pending snooze tasks and removes registry state
@@ -299,6 +350,12 @@ Use cases:
 IMPORTANT: Stage 4 (final warning) should NEVER use -Dismiss to enforce reboot decision.
 Default: $false (dismiss button hidden)
 
+.PARAMETER AdvanceStage
+When specified with -Snooze, increments SnoozeCount in registry by 1 before reading stage
+configuration. Used by Stage 3 fallback tasks to advance to Stage 4 (auto-reboot) when the
+user has not rebooted after the final warning period expires.
+Default: $false
+
 .EXAMPLE
 Toast_Notify.ps1 -XMLSource "PhoneSystemProblems.xml"
 
@@ -378,7 +435,9 @@ Param
     [Switch]$Dismiss = $false,
     [Parameter(Mandatory = $False)]
     [ValidateLength(1, 128)]
-    [String]$AppIDName = "System IT"
+    [String]$AppIDName = "System IT",
+    [Parameter(Mandatory = $False)]
+    [Switch]$AdvanceStage = $false
 )
 
 #region Helper Functions
@@ -919,7 +978,7 @@ function Get-StageDetails {
         }
         1 {
             $StageConfig.Stage = 1
-            $StageConfig.Scenario = "reminder"
+            $StageConfig.Scenario = "alarm"
             $StageConfig.SnoozeInterval = "1h"
             $StageConfig.AllowDismiss = $true
             $StageConfig.AudioLoop = $false
@@ -927,7 +986,7 @@ function Get-StageDetails {
         }
         2 {
             $StageConfig.Stage = 2
-            $StageConfig.Scenario = "reminder"
+            $StageConfig.Scenario = "alarm"
             $StageConfig.SnoozeInterval = "30m"
             $StageConfig.AllowDismiss = $true
             $StageConfig.AudioLoop = $false
@@ -1462,19 +1521,22 @@ If ($XMLValid -eq $True) {
             # Snooze handler (v1.9) creates task action arguments dynamically using these values.
             # Without this, the snooze task would default to CustomMessage.xml which may not
             # exist in the staged directory and the re-displayed toast would fail silently.
-            Write-Output "Storing XMLSource and ToastScenario in registry for snooze handler..."
+            Write-Output "Storing XMLSource, ToastScenario and RebootCountdownMinutes in registry for snooze handler..."
             try {
                 $ErrorActionPreference = 'Stop'
                 Set-ItemProperty -Path "${RegistryHive}:\${RegistryPath}\$ToastGUID" `
                     -Name "XMLSource" -Value $XMLSource -Type String
                 Set-ItemProperty -Path "${RegistryHive}:\${RegistryPath}\$ToastGUID" `
                     -Name "ToastScenario" -Value $ToastScenario -Type String
+                Set-ItemProperty -Path "${RegistryHive}:\${RegistryPath}\$ToastGUID" `
+                    -Name "RebootCountdownMinutes" -Value $RebootCountdownMinutes -Type DWord
                 Write-Output "[OK] XMLSource stored: $XMLSource"
                 Write-Output "[OK] ToastScenario stored: $ToastScenario"
+                Write-Output "[OK] RebootCountdownMinutes stored: $RebootCountdownMinutes"
             }
             catch {
-                Write-Warning "Failed to store XMLSource/ToastScenario in registry: $($_.Exception.Message)"
-                Write-Warning "Snooze tasks may default to CustomMessage.xml"
+                Write-Warning "Failed to store XMLSource/ToastScenario/RebootCountdownMinutes in registry: $($_.Exception.Message)"
+                Write-Warning "Snooze tasks may default to CustomMessage.xml or 5-minute reboot countdown"
             }
 
             # Grant permissions if using HKLM (machine-wide state)
@@ -1726,6 +1788,21 @@ If ($XMLValid -eq $True) {
                 Stop-Transcript
                 throw "Registry corruption detected - SnoozeCount out of valid range"
             }
+
+            # Advance stage if requested (used by Stage 3 fallback task to reach Stage 4)
+            If ($AdvanceStage) {
+                $AdvancedFrom = $SnoozeCount
+                $SnoozeCount = [Math]::Min($SnoozeCount + 1, 4)
+                Write-Output "AdvanceStage: Incrementing SnoozeCount $AdvancedFrom -> $SnoozeCount"
+                try {
+                    Set-ItemProperty -Path "${RegistryHive}:\${RegistryPath}\$ToastGUID" `
+                        -Name "SnoozeCount" -Value $SnoozeCount -ErrorAction Stop
+                    Write-Output "[OK] Registry SnoozeCount advanced to $SnoozeCount"
+                }
+                catch {
+                    Write-Warning "[!] Could not advance SnoozeCount in registry: $($_.Exception.Message)"
+                }
+            }
         }
 
         #Get logged on user DisplayName
@@ -1866,6 +1943,77 @@ If ($XMLValid -eq $True) {
             Write-Output "Snooze Interval: $($StageConfig.SnoozeInterval)"
             Write-Output "Dismissable: $($StageConfig.AllowDismiss)"
 
+            # Pre-schedule fallback task to close enforcement loop gap
+            # If user clicks Learn More, lets toast time out, or dismisses without using Snooze/Reboot/Dismiss buttons,
+            # this fallback task ensures the next toast still fires.
+            # Snooze/Reboot/Dismiss handlers cancel this task and substitute their own scheduled action.
+            # Only schedule fallback for Stages 0-3 (Stage 4 requires reboot decision, no fallback).
+            if ($StageConfig.Stage -lt 4) {
+                $FallbackTaskName = "Toast_Notification_${ToastGUID}_$($env:USERNAME)_Fallback"
+                $FallbackIntervalHours = switch ($StageConfig.Stage) {
+                    0 { 4 }
+                    1 { 2 }
+                    2 { 1 }
+                    3 { 2 }
+                    default { 4 }
+                }
+                $FallbackTriggerTime = (Get-Date).AddHours($FallbackIntervalHours)
+                $FallbackExpiry = (Get-Date).AddDays(3).ToString('s')
+
+                try {
+                    $FallbackAdvanceStage = ' -AdvanceStage'
+                    $FallbackArguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass" +
+                        " -File `"$($MyInvocation.MyCommand.Path)`"" +
+                        " -ToastGUID `"$ToastGUID`"" +
+                        " -XMLSource `"$XMLSource`"" +
+                        " -ToastScenario `"$ToastScenario`"" +
+                        " -RebootCountdownMinutes $RebootCountdownMinutes" +
+                        " -Snooze" +
+                        $FallbackAdvanceStage
+
+                    $FallbackAction = New-ScheduledTaskAction `
+                        -Execute "C:\WINDOWS\system32\WindowsPowerShell\v1.0\PowerShell.exe" `
+                        -Argument $FallbackArguments
+
+                    $FallbackTrigger = New-ScheduledTaskTrigger -Once -At $FallbackTriggerTime
+                    $FallbackTrigger.EndBoundary = $FallbackExpiry
+
+                    $FallbackPrincipal = New-ScheduledTaskPrincipal `
+                        -UserId $env:USERNAME `
+                        -LogonType Interactive `
+                        -RunLevel Limited
+
+                    $FallbackSettings = New-ScheduledTaskSettingsSet `
+                        -MultipleInstances IgnoreNew `
+                        -ExecutionTimeLimit (New-TimeSpan -Hours 1) `
+                        -StartWhenAvailable `
+                        -DeleteExpiredTaskAfter (New-TimeSpan -Hours 4)
+
+                    Register-ScheduledTask `
+                        -TaskName $FallbackTaskName `
+                        -Action $FallbackAction `
+                        -Trigger $FallbackTrigger `
+                        -Principal $FallbackPrincipal `
+                        -Settings $FallbackSettings `
+                        -Force `
+                        -ErrorAction Stop | Out-Null
+
+                    Write-Output "[OK] Fallback task registered: $FallbackTaskName"
+                    Write-Output "     Fires at: $($FallbackTriggerTime.ToString('s')) (${FallbackIntervalHours}h fallback for Stage $($StageConfig.Stage))"
+                    Write-Output "     Cancelled by: Snooze/Reboot/Dismiss handlers"
+                    If ($StageConfig.Stage -eq 3) {
+                        Write-Output "     Stage 3 fallback: will advance SnoozeCount to 4 (auto-reboot)"
+                    }
+                }
+                catch {
+                    Write-Warning "[!] Could not register fallback task (non-fatal): $($_.Exception.Message)"
+                    Write-Warning "    Enforcement loop may not recover if user does not click Snooze"
+                }
+            }
+            else {
+                Write-Output "[INFO] Stage 4: No fallback task scheduled (reboot decision required)"
+            }
+
             # Override ToastScenario with stage-specific scenario (unless ForceDisplay set)
             if (!$ForceDisplay) {
                 $ToastScenario = $StageConfig.Scenario
@@ -1930,6 +2078,15 @@ If ($XMLValid -eq $True) {
             # Use specified scenario (alarm, urgent, reminder all hide dismiss button)
             $ScenarioAttribute = "scenario=`"$ToastScenario`""
             Write-Verbose "Using scenario=$ToastScenario (dismiss button hidden)"
+        }
+
+        # For Stage 4: append computed reboot time to EventText before XML encoding
+        # shutdown.exe is called after toast display, but RebootCountdownMinutes is known now
+        if ($Snooze -and $StageConfig.Stage -eq 4) {
+            $RebootAt = (Get-Date).AddMinutes($RebootCountdownMinutes)
+            $CountdownSuffix = " System will reboot in $RebootCountdownMinutes minutes at $($RebootAt.ToString('HH:mm'))."
+            $EventText = $EventText + $CountdownSuffix
+            Write-Output "Stage 4: Appended reboot countdown to EventText: $CountdownSuffix"
         }
 
         # XML-encode all text variables for safe embedding
@@ -2016,8 +2173,9 @@ If ($XMLValid -eq $True) {
                 Write-Output "Adding reboot button: $RebootTitle_Safe (Protocol: $RebootProtocolUri)"
                 $ActionsXML += "<action arguments=`"$RebootProtocolUri`" content=`"$RebootTitle_Safe`" activationType=`"protocol`" />"
             }
-            else {
-                # Stages 0-3: Add generic action button
+            elseif ($StageConfig.Stage -lt 3) {
+                # Stages 0-2 only: Add generic action button (e.g. Learn More / BIOS info URL)
+                # Stage 3: Final warning - no generic button, only Reboot Now (added via AllowDismiss block)
                 Write-Output "Adding action button: $ButtonTitle_Safe"
                 $ActionsXML += "<action arguments=`"$ButtonAction_Safe`" content=`"$ButtonTitle_Safe`" activationType=`"protocol`" />"
             }
@@ -2029,9 +2187,9 @@ If ($XMLValid -eq $True) {
                 $ActionsXML += "<action arguments=`"$RebootProtocolUri`" content=`"$RebootTitle_Safe`" activationType=`"protocol`"/>"
             }
 
-            # Add Dismiss button for Stages 0-3 (calls toast-dismiss:// protocol to clean up tasks/registry)
+            # Add Dismiss button for Stages 0-3 (only if -Dismiss switch provided)
             # Stage 4: No dismiss - user must make reboot decision
-            if ($StageConfig.AllowDismiss) {
+            if ($StageConfig.AllowDismiss -and $Dismiss) {
                 $DismissProtocolUri = "toast-dismiss://$ToastGUID/dismiss"
                 Write-Output "Adding dismiss button for Stage $($StageConfig.Stage) (Protocol: $DismissProtocolUri)"
                 $ActionsXML += "<action arguments=`"$DismissProtocolUri`" content=`"Dismiss`" activationType=`"protocol`" />"
@@ -2047,11 +2205,16 @@ If ($XMLValid -eq $True) {
             $ButtonTitle_Safe = ConvertTo-XmlSafeString $ButtonTitle
             $ButtonAction_Safe = ConvertTo-XmlSafeString $ButtonAction
 
+            $DismissActionXml = ''
+            If ($Dismiss) {
+                $DismissActionXml = '<action arguments="dismiss" content="Dismiss" activationType="system"/>'
+            }
+
             [xml]$ActionTemplate = @"
 <toast>
     <actions>
         <action arguments="$ButtonAction_Safe" content="$ButtonTitle_Safe" activationType="protocol" />
-        <action arguments="dismiss" content="Dismiss" activationType="system"/>
+        $DismissActionXml
     </actions>
 </toast>
 "@
@@ -2238,6 +2401,89 @@ If ($XMLValid -eq $True) {
                 catch {
                     Write-Error "Failed to schedule reboot: $($_.Exception.Message)"
                 }
+
+                # --- Stage 4 artefact cleanup ---
+                # Mirrors Toast_Reboot_Handler.ps1 cleanup pattern (non-fatal, ASCII markers only).
+                # Without this block, the snooze task that triggered Stage 4 (e.g. _Snooze3) survives
+                # the reboot and re-fires, showing the toast again unnecessarily.
+                Write-Output "Cleaning up toast artefacts to prevent re-display after reboot..."
+
+                # 1. Remove registry state for this toast GUID
+                $RegKeyPath = "${RegistryHive}:\${RegistryPath}\$ToastGUID"
+                try {
+                    if (Test-Path $RegKeyPath) {
+                        Remove-Item -Path $RegKeyPath -Recurse -Force -ErrorAction Stop
+                        Write-Output "[OK] Registry state removed: $RegKeyPath"
+                    }
+                    else {
+                        Write-Output "[INFO] Registry key not found (already removed or not created): $RegKeyPath"
+                    }
+                }
+                catch {
+                    Write-Warning "Could not remove registry key: $($_.Exception.Message)"
+                    Write-Warning "Continuing with reboot - registry cleanup non-fatal"
+                }
+
+                # 2. Unregister all user-specific snooze tasks for this GUID
+                # v1.9+: task names include username to deconflict multi-user endpoints
+                # Format: Toast_Notification_{GUID}_{Username}_Snooze{N}
+                $CleanupUsername = $env:USERNAME
+                for ($i = 1; $i -le 10; $i++) {
+                    $TaskName = "Toast_Notification_${ToastGUID}_${CleanupUsername}_Snooze${i}"
+                    try {
+                        $Task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+                        if ($Task) {
+                            Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop
+                            Write-Output "[OK] Snooze task removed: $TaskName"
+                        }
+                        else {
+                            # No more tasks at this index - stop looking
+                            if ($i -gt 1) { break }
+                        }
+                    }
+                    catch {
+                        Write-Warning "Could not remove task ${TaskName}: $($_.Exception.Message)"
+                        Write-Warning "Continuing - task cleanup non-fatal"
+                    }
+                }
+
+                # 2b. Unregister fallback task (pre-scheduled by v2.26+)
+                # Stage 4 is the authoritative resolution - fallback must be removed.
+                $FallbackTaskName = "Toast_Notification_${ToastGUID}_${CleanupUsername}_Fallback"
+                try {
+                    $FallbackTask = Get-ScheduledTask -TaskName $FallbackTaskName -ErrorAction SilentlyContinue
+                    if ($FallbackTask) {
+                        Unregister-ScheduledTask -TaskName $FallbackTaskName -Confirm:$false -ErrorAction Stop
+                        Write-Output "[OK] Fallback task removed: $FallbackTaskName"
+                    }
+                    else {
+                        Write-Output "[INFO] No fallback task found: $FallbackTaskName"
+                    }
+                }
+                catch {
+                    Write-Warning "[!] Fallback task removal non-fatal: $($_.Exception.Message)"
+                }
+
+                # 3. Disable main notification task to prevent re-display after reboot
+                # Use Disable-ScheduledTask (not Unregister) - matches reboot handler pattern.
+                # Without this, Toast_Notification_{GUID} fires again after restart.
+                $MainTaskName = "Toast_Notification_$ToastGUID"
+                try {
+                    $MainTask = Get-ScheduledTask -TaskName $MainTaskName -ErrorAction SilentlyContinue
+                    if ($MainTask) {
+                        Disable-ScheduledTask -TaskName $MainTaskName -ErrorAction Stop | Out-Null
+                        Write-Output "[OK] Main notification task disabled: $MainTaskName"
+                    }
+                    else {
+                        Write-Output "[INFO] Main notification task not found: $MainTaskName"
+                    }
+                }
+                catch {
+                    Write-Warning "Could not disable main task ${MainTaskName}: $($_.Exception.Message)"
+                    Write-Warning "Continuing - task cleanup non-fatal"
+                }
+
+                Write-Output "[OK] Artefact cleanup completed - reboot countdown active"
             }
         }
 
