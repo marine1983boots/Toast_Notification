@@ -375,7 +375,10 @@ Param
     [ValidateRange(1, 365)]
     [Int]$CleanupDaysThreshold = 30,
     [Parameter(Mandatory = $False)]
-    [Switch]$Dismiss = $false
+    [Switch]$Dismiss = $false,
+    [Parameter(Mandatory = $False)]
+    [ValidateLength(1, 128)]
+    [String]$AppIDName = "System IT"
 )
 
 #region Helper Functions
@@ -1021,10 +1024,10 @@ function Register-ToastAppId {
         Returns detailed status object for caller decision-making.
     .PARAMETER AppId
         The AppUserModelId to register
-    .PARAMETER DisplayName
+    .PARAMETER AppIDDisplayName
         Display name shown in Windows notification settings
     .EXAMPLE
-        $Result = Register-ToastAppId -AppId "MyApp.ID" -DisplayName "My Application"
+        $Result = Register-ToastAppId -AppId "MyApp.ID" -AppIDDisplayName "My Application"
         if ($Result.Success) { Write-Host "Registration successful" }
     #>
     [CmdletBinding()]
@@ -1033,7 +1036,7 @@ function Register-ToastAppId {
         [String]$AppId,
 
         [Parameter(Mandatory = $false)]
-        [String]$DisplayName = "Toast Notification"
+        [String]$AppIDDisplayName = "Toast Notification System"
     )
 
     $Result = [PSCustomObject]@{
@@ -1068,6 +1071,13 @@ function Register-ToastAppId {
             try {
                 $Existing = Get-ItemProperty -Path $RegPath -ErrorAction Stop
                 Write-Verbose "AppUserModelId already registered: $AppId"
+
+                # Update DisplayName if it differs from the desired value
+                if ($Existing.DisplayName -ne $AppIDDisplayName) {
+                    Write-Verbose "Updating DisplayName: '$($Existing.DisplayName)' -> '$AppIDDisplayName'"
+                    Set-ItemProperty -Path $RegPath -Name "DisplayName" -Value $AppIDDisplayName -Type String -ErrorAction Stop
+                }
+
                 $Result.Success = $true
                 return $Result
             }
@@ -1093,7 +1103,7 @@ function Register-ToastAppId {
         }
 
         try {
-            Set-ItemProperty -Path $RegPath -Name "DisplayName" -Value $DisplayName -Type String -ErrorAction Stop
+            Set-ItemProperty -Path $RegPath -Name "DisplayName" -Value $AppIDDisplayName -Type String -ErrorAction Stop
         }
         catch [System.UnauthorizedAccessException] {
             $Result.ErrorCategory = "DISPLAYNAME_SET_ACCESS_DENIED"
@@ -1106,7 +1116,7 @@ function Register-ToastAppId {
         # Verify registration succeeded
         try {
             $Verify = Get-ItemProperty -Path $RegPath -ErrorAction Stop
-            if ($Verify.DisplayName -eq $DisplayName) {
+            if ($Verify.DisplayName -eq $AppIDDisplayName) {
                 Write-Verbose "AppUserModelId registered and verified successfully"
                 $Result.Success = $true
             }
@@ -1344,7 +1354,8 @@ If ($XMLValid -eq $True) {
     $ToastTitle = [string]$XMLToast.ToastContent.ToastTitle
     $Signature = [string]$XMLToast.ToastContent.Signature
     $EventTitle = [string]$XMLToast.ToastContent.EventTitle
-    $EventText = [string]$XMLToast.ToastContent.EventText
+    $EventText = Get-StageEventText -XmlDocument $XMLToast -StageNumber 0
+    if ([string]::IsNullOrWhiteSpace($EventText)) { $EventText = '' }
     $ButtonTitle = [string]$XMLToast.ToastContent.ButtonTitle
     $ButtonAction = [string]$XMLToast.ToastContent.ButtonAction
     $SnoozeTitle = [string]$XMLToast.ToastContent.SnoozeTitle
@@ -1356,6 +1367,68 @@ If ($XMLValid -eq $True) {
     #Images
     $BadgeImage = "file:///$CurrentDir/badgeimage.jpg"
     $HeroImage = "file:///$CurrentDir/heroimage.jpg"
+
+    # --- Manufacturer Detection ---
+    # Detect hardware vendor via CIM and select per-manufacturer config from XML.
+    # Supported: HP, Lenovo. Unknown vendors fall back to Default config.
+    $DetectedManufacturer = 'Default'
+    try {
+        $RawManufacturer = (Get-CimInstance -ClassName Win32_ComputerSystemProduct -ErrorAction Stop).Vendor
+        Write-Verbose "Raw manufacturer string: $RawManufacturer"
+    }
+    catch {
+        $RawManufacturer = 'Unknown'
+        Write-Warning "Could not detect manufacturer via CIM. Defaulting to generic config. Error: $($_.Exception.Message)"
+    }
+
+    # NOTE: Each case below MUST have a corresponding XML node in <ManufacturerConfig>
+    # inside BIOS_Update.xml. Supported: HP, Lenovo, Default.
+    # If detected manufacturer has no matching XML node the code falls back to Default.
+    # To add a vendor: add a switch case here and a child node in the XML.
+    switch -Regex ($RawManufacturer) {
+        '(?i)HP|Hewlett' {
+            $DetectedManufacturer = 'HP'
+            Write-Verbose "Manufacturer resolved: HP"
+        }
+        '(?i)Lenovo' {
+            $DetectedManufacturer = 'Lenovo'
+            Write-Verbose "Manufacturer resolved: Lenovo"
+        }
+        default {
+            $DetectedManufacturer = 'Default'
+            Write-Verbose "Manufacturer unrecognised ($RawManufacturer) - using Default config"
+        }
+    }
+
+    # Apply manufacturer-specific asset overrides from XML ManufacturerConfig node
+    $ManufacturerNode = $XMLToast.ToastContent.ManufacturerConfig.$DetectedManufacturer
+    if (-not $ManufacturerNode) {
+        $ManufacturerNode = $XMLToast.ToastContent.ManufacturerConfig.Default
+        Write-Verbose "ManufacturerConfig node not found for '$DetectedManufacturer' - using Default"
+    }
+
+    if ($ManufacturerNode) {
+        $MfrBadge  = [string]$ManufacturerNode.BadgeImage
+        $MfrButton = [string]$ManufacturerNode.ButtonAction
+
+        if (-not [string]::IsNullOrWhiteSpace($MfrBadge)) {
+            # Security: extract filename only to prevent path traversal (e.g. ../../../evil.jpg)
+            $MfrBadgeSafe = [System.IO.Path]::GetFileName($MfrBadge)
+            # Build file URI then XML-encode to prevent attribute injection in toast template
+            $BadgeImage = ConvertTo-XmlSafeString "file:///$CurrentDir/$MfrBadgeSafe"
+        }
+        if (-not [string]::IsNullOrWhiteSpace($MfrButton)) { $ButtonAction = $MfrButton }
+        Write-Verbose "Manufacturer config applied: BadgeImage=$MfrBadge, ButtonAction=$MfrButton"
+    }
+
+    # Replace {MANUFACTURER} token in toast header variables
+    $EventTitle = $EventTitle -replace '\{MANUFACTURER\}', $DetectedManufacturer
+    $ToastTitle = $ToastTitle -replace '\{MANUFACTURER\}', $DetectedManufacturer
+    $EventText  = $EventText  -replace '\{MANUFACTURER\}', $DetectedManufacturer
+
+    # App display name: set by -AppIDName parameter (default: "System IT")
+    $AppIDDisplayName = $AppIDName
+    Write-Verbose "AppIDDisplayName: $AppIDDisplayName"
 
     #Set COM App ID for toast notifications
     # Use custom AppId following BurntToast approach for reliability
@@ -1809,6 +1882,9 @@ If ($XMLValid -eq $True) {
                 Write-Verbose "Using stage-specific EventText from XML"
             }
 
+            # Replace {MANUFACTURER} token in stage-specific event text
+            $EventText = $EventText -replace '\{MANUFACTURER\}', $DetectedManufacturer
+
             # Build stage attribution text
             $StageAttribution = ""
             switch ($SnoozeCount) {
@@ -2021,7 +2097,7 @@ If ($XMLValid -eq $True) {
         }
         else {
             try {
-                $AppIdRegistered = Register-ToastAppId -AppId $LauncherID -DisplayName "Toast Notification System"
+                $AppIdRegistered = Register-ToastAppId -AppId $LauncherID -AppIDDisplayName $AppIDDisplayName
 
                 if ($AppIdRegistered.Success) {
                     Write-Output "[OK] AppUserModelId registered successfully"

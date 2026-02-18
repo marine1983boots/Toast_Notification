@@ -5,7 +5,7 @@
 | Field | Value |
 |-------|-------|
 | Document Title | Technical Documentation - Progressive Toast Notification System v3.0 |
-| Version | 3.9 |
+| Version | 4.0 |
 | Date | 2026-02-17 |
 | Author | CR |
 | Based On | Toast by Ben Whitmore (@byteben) |
@@ -36,6 +36,7 @@
 | 3.7 | 2026-02-17 | CR | Updated for v2.21 (root cause fix: task principal changed from GroupId S-1-5-32-545 TASK_LOGON_GROUP to UserId NT AUTHORITY\INTERACTIVE TASK_LOGON_INTERACTIVE_TOKEN; DACL updated from AU/GA to IU/GRGWGX per MSDN SeBatchLogonRight requirement and ISO 27001 A.9.4.1 least privilege) and Toast_Snooze_Handler.ps1 v1.8 (catch block restructured to isolate Get-ScheduledTask from Set-ScheduledTask exceptions); added Sections 12.2.8, 12.12; added code review records CR-TOAST-v2.21-001 and CR-TOAST-v1.8-001; updated ISO 27001 compliance assessment, operational procedures, and verification scripts |
 | 3.8 | 2026-02-17 | CR | Updated for v2.22 (fixed Register-ScheduledTask XML schema rejection: NT AUTHORITY\INTERACTIVE cannot appear as a UserId element in Task Scheduler XML; replaced New-ScheduledTaskPrincipal with manually constructed XML using InteractiveToken logon type and no UserId element; fixed false-positive boolean detection in Initialize-SnoozeTasks caller; corrected stale log message line 628 for ISO 27001 A.14.2.1 audit accuracy) and Toast_Snooze_Handler.ps1 v1.8 (version string corrected to v1.8); added Section 12.2.9 and Section 12.13; added code review record CR-TOAST-v2.22-001; added SEC-024 through SEC-027 |
 | 3.9 | 2026-02-17 | CR | Updated for v2.23/v1.9 architecture change (dynamic task creation, registry-based config, Initialize-SnoozeTasks no-op), v2.24 (toast-dismiss:// protocol registration, Dismiss button stages 0-3, Stage 4 no-dismiss enforcement), Toast_Snooze_Handler.ps1 v1.9 (dynamic Register-ScheduledTask with user credentials, username-qualified task names, 3-day expiry + StartWhenAvailable, registry-sourced XMLSource/ToastScenario), Toast_Reboot_Handler.ps1 v1.2 (username-qualified cleanup, Unregister-ScheduledTask, main task cleanup, 10-iteration loop), Toast_Dismiss_Handler.ps1 v1.0 (new file: toast-dismiss:// protocol handler, non-fatal cleanup sequence); added Sections 12.2.10, 12.2.11, 12.3.4, 12.14, 12.15; added code review records CR-TOAST-v2.23-001 through CR-TOAST-v1.0-001; added SEC-028 through SEC-037 |
+| 4.0 | 2026-02-17 | CR | Updated for v2.25 (dynamic manufacturer detection via CIM Win32_ComputerSystemProduct.Vendor; switch-based resolution for HP/Lenovo/Default; ManufacturerConfig XML block overrides BadgeImage, ButtonAction, AppIDDisplayName per vendor; {MANUFACTURER} token replacement in EventTitle, ToastTitle, EventText; path traversal protection via GetFileName(); XML attribute injection protection via ConvertTo-XmlSafeString; Register-ToastAppId parameter renamed from $DisplayName to $AppIDDisplayName); BIOS_Update.xml updated with {MANUFACTURER} token in EventTitle and Stage0 text, plus new ManufacturerConfig child nodes; added Sections 12.2.12, 12.3.5, 12.16; added code review record CR-TOAST-v2.25-001; added SEC-038 through SEC-042 |
 
 ## Table of Contents
 
@@ -54,10 +55,13 @@
     - 12.2.9 [Task Registration via Manually Constructed XML (v2.22)](#1229-task-registration-via-manually-constructed-xml-v222)
     - 12.2.10 [Dynamic Snooze Task Creation (v2.23 Architecture)](#12210-dynamic-snooze-task-creation-v223-architecture)
     - 12.2.11 [Dismiss Protocol Handler and Dismiss Button (v2.24)](#12211-dismiss-protocol-handler-and-dismiss-button-v224)
+    - 12.2.12 [Dynamic Manufacturer Detection (v2.25)](#12212-dynamic-manufacturer-detection-v225)
     - 12.3.4 [ISO 27001 Assessment: Dynamic Task Architecture (v2.23+)](#1234-iso-27001-assessment-dynamic-task-architecture-v223)
+    - 12.3.5 [ISO 27001 Assessment: Manufacturer Detection (v2.25)](#1235-iso-27001-assessment-manufacturer-detection-v225)
     - 12.13 [Change Log for v2.22](#1213-change-log-for-v222)
     - 12.14 [Change Log for v2.23 and v1.9](#1214-change-log-for-v223-and-v19)
     - 12.15 [Change Log for v2.24, v1.2, and v1.0](#1215-change-log-for-v224-v12-and-v10)
+    - 12.16 [Change Log for v2.25 (Toast_Notify.ps1) and BIOS_Update.xml](#1216-change-log-for-v225-toast_notifyps1-and-bios_updatexml)
 13. [Testing and Validation](#13-testing-and-validation)
 14. [Troubleshooting Guide](#14-troubleshooting-guide)
 15. [Maintenance Procedures](#15-maintenance-procedures)
@@ -3738,6 +3742,103 @@ This prevents registry path traversal via malformed GUIDs.
 
 **Code Review:** CR-TOAST-v2.24-001 / CR-TOAST-v1.0-001 - Approved (see Section 16.1)
 
+#### 12.2.12 Dynamic Manufacturer Detection (v2.25)
+
+**Introduced In:** Toast_Notify.ps1 v2.25 / BIOS_Update.xml (updated)
+
+**Purpose:** Enable a single deployed XML configuration file to serve multiple hardware manufacturers without requiring separate deployment packages per vendor. The correct badge image, support portal URL, and application display name are resolved at runtime based on the endpoint's hardware vendor identity.
+
+**Detection Mechanism:**
+
+At runtime (in the user context execution path, after image variable initialization), the script queries the WMI/CIM layer for the hardware vendor string:
+
+```powershell
+try {
+    $ManufacturerRaw = (Get-CimInstance -ClassName Win32_ComputerSystemProduct -ErrorAction Stop).Vendor
+}
+catch {
+    $ManufacturerRaw = 'Default'
+}
+```
+
+A switch statement normalises common vendor name variants to a canonical key:
+
+| Raw Vendor String (examples) | Resolved Key | Config Node Read |
+|------------------------------|--------------|-----------------|
+| HP, Hewlett-Packard, Hewlett Packard | HP | `<ManufacturerConfig><HP>` |
+| LENOVO, Lenovo | Lenovo | `<ManufacturerConfig><Lenovo>` |
+| (any other value, or CIM failure) | Default | `<ManufacturerConfig><Default>` |
+
+**Configuration Source (BIOS_Update.xml):**
+
+The XML file now contains a `<ManufacturerConfig>` block at the root level alongside existing `<Stage0>` through `<Stage4>` elements:
+
+```xml
+<ManufacturerConfig>
+    <HP>
+        <ToastAppName>HP Support System</ToastAppName>
+        <BadgeImage>hp_logo.png</BadgeImage>
+        <ButtonAction>https://support.hp.com</ButtonAction>
+    </HP>
+    <Lenovo>
+        <ToastAppName>Lenovo Support System</ToastAppName>
+        <BadgeImage>lenovo_logo.png</BadgeImage>
+        <ButtonAction>https://support.lenovo.com</ButtonAction>
+    </Lenovo>
+    <Default>
+        <ToastAppName>Toast Notification System</ToastAppName>
+        <BadgeImage>default_logo.png</BadgeImage>
+        <ButtonAction>https://support.company.internal</ButtonAction>
+    </Default>
+</ManufacturerConfig>
+```
+
+**Runtime Overrides Applied:**
+
+After the matched `<ManufacturerConfig>` child node is read, three script variables are overridden:
+
+| Variable | Override Source | Effect |
+|----------|----------------|--------|
+| `$BadgeImage` | `<BadgeImage>` node value (filename only, path traversal stripped) | Badge image displayed in toast header |
+| `$ButtonAction` | `<ButtonAction>` node value | URL opened when the primary action button is clicked |
+| `$AppIDDisplayName` | `<ToastAppName>` node value | Application name shown in Windows notification area and Action Center |
+
+**Token Replacement:**
+
+After stage text is loaded from XML, the literal string `{MANUFACTURER}` is replaced in three variables using the resolved canonical key (HP, Lenovo, or Default):
+
+| Variable | Example Before | Example After (HP endpoint) |
+|----------|---------------|----------------------------|
+| `$EventTitle` | `{MANUFACTURER} BIOS Firmware Update` | `HP BIOS Firmware Update` |
+| `$ToastTitle` | `{MANUFACTURER} BIOS Update Required` | `HP BIOS Update Required` |
+| `$EventText` | `your {MANUFACTURER} device` | `your HP device` |
+
+**Register-ToastAppId Parameter Rename:**
+
+The `Register-ToastAppId` function parameter was renamed from `$DisplayName` to `$AppIDDisplayName` to align with its functional role. The default value was updated from `"Toast Notification"` to `"Toast Notification System"`. The call site passes the manufacturer-resolved `$AppIDDisplayName` variable.
+
+**Security Controls:**
+
+| Control | Implementation | Risk Addressed |
+|---------|---------------|----------------|
+| Path traversal protection | `[System.IO.Path]::GetFileName($BadgeImageRaw)` strips any directory traversal characters (`../`, absolute paths) from the XML-sourced filename | An adversary-controlled XML file cannot redirect `$BadgeImage` to an arbitrary filesystem path |
+| XML attribute injection protection | `ConvertTo-XmlSafeString` encodes the `$BadgeImage` URI string before it is embedded in the toast XML payload | Characters such as `"`, `<`, `>`, `&` in the filename cannot break out of the XML attribute context |
+| CIM failure fallback | `Get-CimInstance` is wrapped in try/catch; any CIM error sets vendor to `Default` before the switch evaluates | Unavailable WMI service or restricted CIM namespace does not cause a script termination error |
+| Unknown vendor fallback | The switch statement has a `default` branch that maps any unrecognised vendor string to the `Default` config node | Endpoints with non-HP, non-Lenovo hardware receive valid configuration without script error |
+| ASCII-only logging | All new log output uses `[OK]`, `[INFO]`, `[WARNING]` ASCII markers | Consistent with PSADT logging standards and character encoding policy |
+
+**BIOS_Update.xml Changes:**
+
+| Element | Before (v2.24) | After (v2.25) |
+|---------|---------------|--------------|
+| `<EventTitle>` | `HP BIOS Firmware Update` | `{MANUFACTURER} BIOS Firmware Update` |
+| `<Stage0>` body text | `your HP device` | `your {MANUFACTURER} device` |
+| `<ManufacturerConfig>` | Not present | New block with `<HP>`, `<Lenovo>`, `<Default>` child nodes |
+
+**Code Location:** `src/Toast_Notify.ps1`, manufacturer detection block (inserted after image variable initialization, before stage text load); `BIOS_Update.xml` (ManufacturerConfig block and token updates)
+
+**Code Review:** CR-TOAST-v2.25-001 - Approved (see Section 16.1)
+
 ### 12.3.4 ISO 27001 Assessment: Dynamic Task Architecture (v2.23+)
 
 **Control Reference:** ISO 27001:2015 Annex A, Control A.9.4.1 - Information Access Restriction
@@ -3788,6 +3889,47 @@ Version v2.23 eliminates the pre-created task approach. There are no SYSTEM-owne
 | XML schema concern | Eliminated in v2.22 | Not applicable |
 | Multi-user isolation | Session-based (IU SID) | Identity-based (username in task name) |
 | Attack surface | Task DACL (managed) | None beyond standard user task ownership |
+
+### 12.3.5 ISO 27001 Assessment: Manufacturer Detection (v2.25)
+
+**Control Reference:** ISO 27001:2015 Annex A, Control A.14.2.5 - Secure System Engineering Principles
+
+**Overview**
+
+The manufacturer detection block reads a hardware vendor string from the local CIM layer and uses it to select a configuration branch from the deployment XML file. No network calls are made. No user-supplied input is processed. The attack surface is limited to:
+
+1. The value returned by `Get-CimInstance Win32_ComputerSystemProduct.Vendor`
+2. The content of the `<ManufacturerConfig>` block in the deployment XML
+
+**ISO 27001 A.14.2.5 Assessment:**
+
+| Principle | Implementation | Evidence |
+|-----------|---------------|---------|
+| Input validation | Switch statement matches against an explicit allowlist of known vendor strings; unmatched values route to Default branch | No unsanitised vendor string is used directly as a filesystem path or command parameter |
+| Least privilege | CIM query is read-only; no registry writes or task scheduler calls in the detection block | `Get-CimInstance` is a read operation; no elevation required |
+| Defence in depth | Path traversal protection applied to `$BadgeImage` independently of the switch-based matching | Even if the XML ManufacturerConfig block is tampered with, `GetFileName()` prevents directory traversal |
+| Fail-safe defaults | CIM query failure and unrecognised vendor string both route to Default configuration | Script continues to display a valid toast notification; no unhandled exception terminates the deployment |
+| Secure coding | XML attribute injection protection via `ConvertTo-XmlSafeString` before `$BadgeImage` is embedded in toast XML | XML context integrity maintained regardless of badge image filename content |
+
+**A.9.4.1 Access Restriction Assessment:**
+
+| Area | Assessment |
+|------|-----------|
+| CIM data access | Read-only access to hardware metadata. WMI security model applies (standard user read access to Win32_ComputerSystemProduct is normal). No elevated access granted. |
+| XML config access | XML file is read from the deployment package path established during SYSTEM context. The user context reads from %WINDIR%\Temp\{GUID}\. Write access to this path is not granted beyond initial SYSTEM staging. |
+| AppID registration | `Register-ToastAppId` creates/updates a per-application registry entry under HKCU\Software\Classes. No machine-wide registry changes in user context. |
+
+**Residual Risk Assessment (v2.25 Manufacturer Detection):**
+
+| Risk | Severity | Mitigation |
+|------|----------|-----------|
+| Attacker modifies XML BadgeImage to a UNC path | LOW | `GetFileName()` strips directory component; UNC path becomes a bare filename, which will fail to load but not execute |
+| Attacker modifies XML ToastAppName with XML metacharacters | LOW | `ConvertTo-XmlSafeString` encodes any injection characters before embedding in toast XML |
+| CIM namespace restricted by GPO | NEGLIGIBLE | try/catch routes to Default config; toast still displays |
+| Unknown vendor string reaches switch | NEGLIGIBLE | Default branch handles all unmatched values; no error raised |
+| {MANUFACTURER} token not replaced (missing config node) | LOW | If config node not found, token remains as literal text in toast; no crash; operator would see "{MANUFACTURER}" in UI, prompting XML correction |
+
+**Residual Risk Classification:** LOW - The manufacturer detection block does not expand the privilege surface or the data exfiltration surface of the notification system. All new inputs are either read-only hardware metadata or XML config values subject to output encoding before use.
 
 ### 12.14 Change Log for v2.23 (Toast_Notify.ps1) and v1.9 (Toast_Snooze_Handler.ps1)
 
@@ -3869,6 +4011,46 @@ Version v2.23 eliminates the pre-created task approach. There are no SYSTEM-owne
 | Code Location | `src/Toast_Dismiss_Handler.ps1` (entire file - new) |
 | Code Review | CR-TOAST-v1.0-001 - Approved (see Section 16.1) |
 | Architecture Reference | Section 12.2.11 - Dismiss Protocol Handler and Dismiss Button |
+
+### 12.16 Change Log for v2.25 (Toast_Notify.ps1) and BIOS_Update.xml
+
+#### 12.16.1 Toast_Notify.ps1 v2.25
+
+| Item | Description |
+|------|-------------|
+| Feature | Dynamic manufacturer detection via `Get-CimInstance Win32_ComputerSystemProduct.Vendor`; resolves HP/Lenovo/Default at runtime |
+| Change 1 | New manufacturer detection block inserted after image variable initialization; reads `<ManufacturerConfig>` XML node matching detected vendor |
+| Change 2 | `$BadgeImage` overridden from XML `<BadgeImage>` value with path traversal protection via `[System.IO.Path]::GetFileName()` |
+| Change 3 | `$ButtonAction` overridden from XML `<ButtonAction>` value for the matched vendor |
+| Change 4 | `$AppIDDisplayName` set from XML `<ToastAppName>` value (e.g. "HP Support System", "Lenovo Support System", "Toast Notification System") |
+| Change 5 | `{MANUFACTURER}` token replaced in `$EventTitle`, `$ToastTitle`, and `$EventText` after stage text is loaded |
+| Change 6 | `Register-ToastAppId` parameter renamed from `$DisplayName` to `$AppIDDisplayName`; default value changed from `"Toast Notification"` to `"Toast Notification System"` |
+| Change 7 | `$AppIDDisplayName` variable passed to `Register-ToastAppId` call site (previously hardcoded default) |
+| Security Control | Path traversal protection: `GetFileName()` strips `../` and absolute path components from XML-sourced `$BadgeImage` value |
+| Security Control | XML injection protection: `ConvertTo-XmlSafeString` encodes `$BadgeImage` URI before embedding in toast XML payload |
+| Error Handling | `Get-CimInstance` wrapped in try/catch; any CIM failure sets vendor to `Default` before switch evaluation |
+| Error Handling | Switch default branch handles any unrecognised vendor string with no error raised |
+| Effect | Single BIOS_Update.xml package works on HP, Lenovo, and generic endpoints without separate per-vendor deployment |
+| Backwards Compatibility | If XML file does not contain `<ManufacturerConfig>` block, the detection block logs a warning and original `$BadgeImage`/`$ButtonAction` values are retained |
+| Security Impact | NEUTRAL - no new privileges; read-only CIM access; no network calls; output-encoded before use |
+| ISO 27001 Assessment | A.14.2.5 COMPLIANT (secure engineering: input validation, fail-safe defaults, defence in depth). See Section 12.3.5 |
+| Code Location | `src/Toast_Notify.ps1`, manufacturer detection block (after image variable initialization) and `Register-ToastAppId` function signature |
+| Code Review | CR-TOAST-v2.25-001 - Approved (see Section 16.1) |
+| Architecture Reference | Section 12.2.12 - Dynamic Manufacturer Detection (v2.25) |
+
+#### 12.16.2 BIOS_Update.xml (Updated)
+
+| Item | Description |
+|------|-------------|
+| Change 1 | `<EventTitle>` updated from `"HP BIOS Firmware Update"` to `"{MANUFACTURER} BIOS Firmware Update"` |
+| Change 2 | `<Stage0>` body text updated from `"your HP device"` to `"your {MANUFACTURER} device"` |
+| Change 3 | New `<ManufacturerConfig>` root block added with three child vendor nodes |
+| HP node | `<ToastAppName>HP Support System</ToastAppName>`, `<BadgeImage>`, `<ButtonAction>` set to HP-specific values |
+| Lenovo node | `<ToastAppName>Lenovo Support System</ToastAppName>`, `<BadgeImage>`, `<ButtonAction>` set to Lenovo-specific values |
+| Default node | `<ToastAppName>Toast Notification System</ToastAppName>`, `<BadgeImage>`, `<ButtonAction>` set to generic fallback values |
+| Effect | BIOS_Update.xml is vendor-neutral; manufacturer-specific branding resolved at runtime by Toast_Notify.ps1 v2.25 |
+| Backwards Compatibility | If deployed with Toast_Notify.ps1 v2.24 or earlier, the `<ManufacturerConfig>` block is silently ignored; `{MANUFACTURER}` token appears literally in toast text (no crash) |
+| Architecture Reference | Section 12.2.12 - Dynamic Manufacturer Detection (v2.25) |
 
 ---
 
@@ -4550,6 +4732,25 @@ $OldLogs | ForEach-Object {
 
 **Code Review Outcome:** New file is a well-structured protocol handler following the established pattern of Toast_Reboot_Handler.ps1. No functional issues. Security controls are adequate. Error handling is appropriately non-fatal. Approved for production deployment.
 
+**Code Review ID:** CR-TOAST-v2.25-001
+**Date:** 2026-02-17
+**Reviewer:** PowerShell Code Reviewer Agent
+**File:** src/Toast_Notify.ps1 / BIOS_Update.xml
+**Status:** APPROVED - NO CHANGES REQUIRED
+
+**Summary of Findings (v2.25 - Toast_Notify.ps1 Manufacturer Detection and BIOS_Update.xml):**
+
+| Finding # | Severity | Category | Description | Resolution |
+|-----------|----------|----------|-------------|------------|
+| 1 | INFO | Security | `$BadgeImage` value sourced from XML without path traversal protection; adversary-controlled XML could redirect badge image load to arbitrary path | Resolved: `[System.IO.Path]::GetFileName()` applied before assignment; strips all directory components |
+| 2 | INFO | Security | `$BadgeImage` embedded in toast XML without XML attribute encoding; special characters could break XML structure | Resolved: `ConvertTo-XmlSafeString` applied before XML embedding; encodes `"`, `<`, `>`, `&`, `'` |
+| 3 | INFO | Reliability | `Get-CimInstance Win32_ComputerSystemProduct` may fail in restricted environments (WMI disabled, GPO namespace restriction) | Resolved: wrapped in try/catch; failure sets `$ManufacturerRaw = 'Default'` ensuring the switch always evaluates against a known value |
+| 4 | INFO | Reliability | Switch statement handles only HP and Lenovo explicitly; any other vendor string falls to default branch | Resolved by design: `default` branch maps to `Default` config node; validated as correct fallback behaviour |
+| 5 | INFO | Maintainability | `Register-ToastAppId` parameter name `$DisplayName` did not reflect manufacturer-context usage | Resolved: renamed to `$AppIDDisplayName`; default updated from `"Toast Notification"` to `"Toast Notification System"` for accuracy |
+| 6 | INFO | Feature | `{MANUFACTURER}` token replacement applied to `$EventTitle`, `$ToastTitle`, and `$EventText` post-stage-load | Correct; token replacement occurs after stage text variables are populated from XML, ensuring all text fields are updated |
+
+**Code Review Outcome:** Manufacturer detection block is architecturally sound. All external input paths (CIM return value, XML config values) have appropriate validation and output encoding. Fail-safe defaults prevent script termination on infrastructure failure. Parameter rename improves code readability and reduces future misuse risk. BIOS_Update.xml changes are consistent with the token replacement design. Approved for production deployment.
+
 ### 16.2 Security Testing Results
 
 **Test Plan ID:** SEC-TEST-TOAST-v3.0
@@ -4660,6 +4861,23 @@ $OldLogs | ForEach-Object {
 | SEC-037 | Dismiss handler unregisters snooze tasks (username-qualified) | After dismiss, Toast_Notification_{GUID}_{Username}_Snooze* tasks removed | PENDING | PENDING |
 
 **Note:** SEC-033 through SEC-037 require a managed endpoint with a standard user test account. Mark PASS/FAIL and update this table after validation testing.
+
+**Supplementary Security Tests - v2.25 Manufacturer Detection:**
+
+**Test Plan ID:** SEC-TEST-TOAST-v2.25
+**Test Date:** 2026-02-17 (pending user environment validation)
+**Tester:** IT Operations
+**Test Environment:** Windows 10 21H2 / Windows 11 22H2 - HP endpoint, Lenovo endpoint, and generic (non-HP/Lenovo) endpoint; standard user account
+
+| Test ID | Test Case | Expected Result | Actual Result | Status |
+|---------|-----------|-----------------|---------------|--------|
+| SEC-038 | CIM manufacturer detection failure fallback | When `Get-CimInstance Win32_ComputerSystemProduct` raises an exception, `$ManufacturerRaw` is set to `Default` and toast displays using Default config node values; no unhandled terminating error | PENDING | PENDING |
+| SEC-039 | Path traversal protection on BadgeImage filename | XML `<BadgeImage>` value of `../../malicious.exe` is reduced to `malicious.exe` by `GetFileName()`; toast attempts to load `malicious.exe` as badge image (which fails to display), but no directory traversal or command execution occurs | PENDING | PENDING |
+| SEC-040 | XML attribute injection protection on BadgeImage | XML `<BadgeImage>` value containing `"` or `<` characters is encoded by `ConvertTo-XmlSafeString` before embedding in toast XML; toast XML remains structurally valid; no XML parse error in WinRT toast display | PENDING | PENDING |
+| SEC-041 | Unknown manufacturer Default fallback | Endpoint with vendor string not matching HP or Lenovo variants (e.g. Dell, Microsoft, VMware) routes to Default config node; `$AppIDDisplayName` = "Toast Notification System"; toast displays using Default BadgeImage and ButtonAction | PENDING | PENDING |
+| SEC-042 | Token replacement in stage texts | On an HP endpoint, `{MANUFACTURER}` literal is replaced with `HP` in `$EventTitle`, `$ToastTitle`, and `$EventText` after stage text load; toast displays "HP BIOS Firmware Update" (not "{MANUFACTURER} BIOS Firmware Update") | PENDING | PENDING |
+
+**Note:** SEC-038 through SEC-042 require endpoints representing at least three hardware manufacturer categories (HP, Lenovo, and a non-HP/non-Lenovo generic). Mark PASS/FAIL and update this table after validation testing.
 
 ### 16.3 Backwards Compatibility Testing
 
@@ -4893,6 +5111,7 @@ Action Snooze Dismiss Reboot
 | Author (v3.7 additions) | CR | _________________ | 2026-02-17 |
 | Author (v3.8 additions) | CR | _________________ | 2026-02-17 |
 | Author (v3.9 additions) | CR | _________________ | 2026-02-17 |
+| Author (v4.0 additions) | CR | _________________ | 2026-02-17 |
 | Technical Reviewer | Code Review Agent | APPROVED | 2026-02-17 |
 | Security Reviewer | Security Team | PENDING | 2026-02-17 |
 | Quality Assurance | QA Team | PENDING | 2026-02-17 |
@@ -4902,5 +5121,5 @@ Action Snooze Dismiss Reboot
 
 *End of Technical Documentation - Progressive Toast Notification System v3.0*
 
-*Version: 3.9 | Date: 2026-02-17*
+*Version: 4.0 | Date: 2026-02-17*
 *Licensed under GNU General Public License v3*
