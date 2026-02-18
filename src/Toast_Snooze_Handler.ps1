@@ -5,6 +5,18 @@ Created by:   Ben Whitmore (with AI assistance)
 Filename:     Toast_Snooze_Handler.ps1
 ===========================================================================
 
+Version 1.11 - 18/02/2026
+-RebootCountdownMinutes now read from HKLM registry (stored by Toast_Notify.ps1 v2.30)
+-RebootCountdownMinutes now included in snooze task action arguments
+-Ensures configured countdown propagates through entire snooze task chain
+-Fallback default: 5 minutes (matches Toast_Notify.ps1 parameter default)
+
+Version 1.10 - 18/02/2026
+-Cancel fallback task (Toast_Notification_{GUID}_{Username}_Fallback) after snooze task registered
+-Fallback task is pre-scheduled by Toast_Notify.ps1 v2.26 before the toast is shown
+-Ensures the snooze task is the authoritative next action, not the fallback
+-Non-fatal: if fallback cancellation fails, logs warning and continues
+
 Version 1.9 - 17/02/2026
 -ARCHITECTURE CHANGE: Replaced pre-created task activation with dynamic task creation in user context
 -ROOT CAUSE: All pre-created task principal types failed for standard user modification
@@ -317,6 +329,12 @@ try {
     }
     Write-Output "Toast XMLSource: $StoredXMLSource"
     Write-Output "Toast Scenario: $StoredToastScenario"
+    $StoredRebootCountdownMinutes = $CurrentState.RebootCountdownMinutes
+    if (-not $StoredRebootCountdownMinutes -or $StoredRebootCountdownMinutes -lt 1) {
+        Write-Warning "RebootCountdownMinutes not found in registry - using default 5 minutes"
+        $StoredRebootCountdownMinutes = 5
+    }
+    Write-Output "Reboot Countdown: $StoredRebootCountdownMinutes minutes"
 
     # Validate snooze count (max 4)
     if ($CurrentSnoozeCount -ge 4) {
@@ -464,6 +482,7 @@ try {
             " -ToastGUID `"$ToastGUID`"" +
             " -XMLSource `"$StoredXMLSource`"" +
             " -ToastScenario `"$StoredToastScenario`"" +
+            " -RebootCountdownMinutes $StoredRebootCountdownMinutes" +
             " -Snooze"
         $TaskAction = New-ScheduledTaskAction `
             -Execute "C:\WINDOWS\system32\WindowsPowerShell\v1.0\PowerShell.exe" `
@@ -499,6 +518,23 @@ try {
         Write-Output "     Runs as: $env:USERNAME (Interactive, Limited)"
         Write-Output "     XMLSource: $StoredXMLSource"
         Write-Output "     ToastScenario: $StoredToastScenario"
+
+        # Cancel fallback task (pre-scheduled by Toast_Notify.ps1 to handle Learn More / timeout scenarios)
+        # Now that user has clicked Snooze, the snooze task above is the authoritative next action.
+        $FallbackTaskName = "Toast_Notification_${ToastGUID}_$($env:USERNAME)_Fallback"
+        try {
+            $FallbackTask = Get-ScheduledTask -TaskName $FallbackTaskName -ErrorAction SilentlyContinue
+            if ($FallbackTask) {
+                Unregister-ScheduledTask -TaskName $FallbackTaskName -Confirm:$false -ErrorAction Stop
+                Write-Output "[OK] Fallback task cancelled: $FallbackTaskName"
+            }
+            else {
+                Write-Output "[INFO] No fallback task found to cancel: $FallbackTaskName"
+            }
+        }
+        catch {
+            Write-Warning "[!] Could not cancel fallback task (non-fatal): $($_.Exception.Message)"
+        }
     }
     catch {
         $ErrorActionPreference = 'Continue'

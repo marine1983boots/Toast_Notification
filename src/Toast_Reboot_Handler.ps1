@@ -8,6 +8,12 @@
     When invoked from a -Snooze toast, also cleans up registry state and scheduled tasks
     for this toast GUID before rebooting.
 
+    Version 1.3 - 18/02/2026
+    -Cancel fallback task (Toast_Notification_{GUID}_{Username}_Fallback) during cleanup
+    -Fallback task is pre-scheduled by Toast_Notify.ps1 v2.26 before the toast is shown
+    -Ensures fallback does not fire after reboot path is taken
+    -Non-fatal: if fallback removal fails, logs warning and continues
+
     Version 1.2 - 17/02/2026
     -FIX: Task cleanup now uses username-qualified names matching v1.9 snooze handler format
     -FIX: Use Unregister-ScheduledTask instead of Disable-ScheduledTask (fully removes tasks)
@@ -119,6 +125,24 @@ try {
                         Write-Warning "Could not remove task ${TaskName}: $($_.Exception.Message)"
                         Write-Warning "Continuing - task cleanup non-fatal"
                     }
+                }
+
+                # 2b. Cancel fallback task (pre-scheduled by Toast_Notify.ps1 v2.26)
+                # Fallback fires if user ignores toast (Learn More, timeout, natural dismiss).
+                # Reboot path is the authoritative resolution - fallback must be removed.
+                $FallbackTaskName = "Toast_Notification_${ToastGUID}_${CleanupUsername}_Fallback"
+                try {
+                    $FallbackTask = Get-ScheduledTask -TaskName $FallbackTaskName -ErrorAction SilentlyContinue
+                    if ($FallbackTask) {
+                        Unregister-ScheduledTask -TaskName $FallbackTaskName -Confirm:$false -ErrorAction Stop
+                        Write-Output "[OK] Fallback task removed: $FallbackTaskName"
+                    }
+                    else {
+                        Write-Output "[INFO] No fallback task found: $FallbackTaskName"
+                    }
+                }
+                catch {
+                    Write-Warning "[!] Fallback task removal non-fatal: $($_.Exception.Message)"
                 }
 
                 # 3. Disable the main notification task to prevent re-display after reboot

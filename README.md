@@ -1,278 +1,274 @@
-# Version History
+# Toast Notification System
 
-**Version 2.4 - 16/02/2026**
+A PowerShell-based enterprise toast notification system for Windows 10/11 with progressive enforcement, designed for SCCM/Intune deployment.
 
-- Added `-WorkingDirectory` parameter for organized folder structure per toast instance
-- Added `-Dismiss` switch to control dismiss (X) button visibility (default: hidden for forced engagement)
-- Added automatic folder structure: `WorkingDirectory\{GUID}\Logs\` and `Scripts\` subfolders
-- Added automatic cleanup function: Removes stale toast folders after configurable threshold
-- Added `-CleanupDaysThreshold` parameter to control automatic bloat prevention (default: 30 days)
-- Removed `-LogDirectory` parameter (simplified: logs always in WorkingDirectory\{GUID}\Logs\)
-- Centralized logging: All logs (Toast_Notify, handlers) in Logs\ subfolder
-- Isolated script staging: Handler working copies in Scripts\ subfolder
-- Changed default location: `C:\ProgramData\ToastNotification\{GUID}` (was: `C:\Windows\Temp\{GUID}`)
-- Full backwards compatibility maintained
+**Current version:** Toast_Notify.ps1 v2.31
+**Production release:** v1.0.0
 
-**Version 2.3 - 16/02/2026**
+---
 
-- Added configurable registry location: `-RegistryHive` parameter (HKLM/HKCU/Custom)
-- Added custom registry path support: `-RegistryPath` parameter
-- Added centralized logging: `-LogDirectory` parameter
-- Automatic permission management for HKLM mode (Grant-RegistryPermissions function)
-- Fixes "Access Denied" errors in corporate environments when snooze button clicked
-- Enables per-user state mode (HKCU) for multi-user scenarios
-- Updated protocol handlers to pass registry and log parameters
-- Full backwards compatibility maintained (defaults to HKLM)
+## Overview
 
-**Version 2.1 - 11/02/2026**
+Toast_Notify.ps1 displays Windows toast notifications to logged-on users. When deployed as SYSTEM (SCCM/Intune), it creates a scheduled task that fires in the user's interactive session, showing the notification with configurable content from an XML file.
 
-- Added -ToastScenario parameter to control toast notification priority and behavior
-- Supports alarm, urgent, reminder, and default scenarios
-- Scenario attribute dynamically applied to toast XML
-- Parameter properly passed through scheduled task
-- Added [CmdletBinding()] for proper PowerShell behavior support
-- Added defensive parameter validation for ToastScenario
+The `-Snooze` switch enables **progressive enforcement** - a 5-stage escalation system that ensures users cannot indefinitely defer critical notifications. Each ignored or snoozed toast advances through stages toward a forced reboot at Stage 4.
 
-**Version 2.0 - 07/02/2021**    
-  
-- Basic logging added  
-- Toast temp directory fixed to $ENV:\Temp\$ToastGUID  
-- Removed unncessary User SID discovery as its no longer needed when running the Scheduled Task as "USERS"  
-- Complete re-write for obtaining Toast Displayname. Name obtained first for Domain User, then AzureAD User from the IdentityStore Logon Cache and finally whoami.exe  
-- Added "AllowStartIfOnBatteries" parameter to Scheduled Task    
+---
 
-**Version 1.2.105 - 05/002/2021**   
-  
-- Changed how we grab the Toast Welcome Name for the Logged on user by leveraging whoami.exe - Thanks Erik Nilsson @dakire    
+## Progressive Enforcement Stages
 
-**Version 1.2.28 - 28/01/2021**    
+| Stage | Scenario | Snooze Interval | Focus Assist | User Options |
+|-------|----------|-----------------|--------------|--------------|
+| 0     | alarm    | 4 hours         | Bypassed     | Snooze / Dismiss |
+| 1     | alarm    | 2 hours         | Bypassed     | Snooze / Dismiss |
+| 2     | alarm    | 1 hour          | Bypassed     | Snooze / Dismiss |
+| 3     | urgent   | None            | Bypassed     | Reboot Now / Dismiss |
+| 4     | alarm    | None (forced)   | Bypassed     | Reboot Now only |
 
-- For AzureAD Joined computers we now try and grab a name to display in the Toast by getting the owner of the process Explorer.exe  
-- Better error handling when Get-xx fails  
+**Fallback escalation:** If a user ignores a toast entirely (no button press, natural timeout), a fallback scheduled task fires after the stage interval and advances to the next stage. A user who never interacts will escalate from Stage 0 to Stage 4 automatically.
 
-**Version 1.2.26 - 26/01/2021**    
+---
 
-- Changed the Scheduled Task to run as -GroupId "S-1-5-32-545" (USERS)  
-- When Toast_Notify.ps1 is deployed as SYSTEM, the scheduled task will be created to run in the context of the Group "Users"  
-This means the Toast will pop for the logged on user even if the username was unobtainable (During testing AzureAD Joined Computers did not populate (Win32_ComputerSystem).Username)  
-- The Toast will also be staged in the $ENV:Windir "Temp\$($ToastGuid)" folder if the logged on user information could not be found  
-- Thanks @CodyMathis123 for the inspiration via https://github.com/CodyMathis123/CM-Ramblings/blob/master/New-PostTeamsMachineWideInstallScheduledTask.ps1  
+## Required Files
 
-**Version 1.2.14 - 14/01/21**    
-  
-- Fixed logic to return logged on DisplayName - Thanks @MMelkersen  
-- Changed the way we retrieve the SID for the current user variable $LoggedOnUserSID  
-- Added Event Title, Description and Source Path to the Scheduled Task that is created to pop the User Toast  
-- Fixed an issue where Snooze was not being passed from the Scheduled Task  
-- Fixed an issue with XMLSource full path not being returned correctly from Scheduled Task  
+```
+src/
+  Toast_Notify.ps1            # Main script
+  Toast_Snooze_Handler.ps1    # Handles Snooze button clicks
+  Toast_Reboot_Handler.ps1    # Handles Reboot Now button clicks
+  Toast_Dismiss_Handler.ps1   # Handles Dismiss button clicks
+  BIOS_Update.xml             # Example XML (replace with your own)
+  BadgeImage_HP.jpg           # Badge image (replace with your own)
+  HeroImage_BIOS.jpg          # Hero image (replace with your own)
+```
 
-**Version 1.2.10 - 10/01/21**    
+All handler scripts and the XML must be in the same directory as `Toast_Notify.ps1` when deployed, or accessible via the paths configured in the XML.
 
-- Removed XMLOtherSource Parameter  
-- Cleaned up XML formatting which removed unnecessary duplication when the Snooze parameter was passed. Action ChildNodes are now appended to ToastTemplate XML.
+---
 
-**Version 1.2 - 09/01/21**  
+## Parameters
 
-- Added logic so if the script is deployed as SYSTEM it will create a scheduled task to run the script for the current logged on user.  
-- If the Toast script is deployed in the SYSTEM context, the script source is copied to a new folder in the users %TEMP% Directory. The folder is given a unique GUID name.  
-- A scheduled task is created for the current logged on user and is unique for the each time the Toast Script is deployed. Each scheduled task is named using the User SID and the unique Task GUID.  
-- If the script is deployed to the current logged on user, a scheduled task is not created and the script is run as normal.  
+### Core Parameters
 
-**Version 1.1 - 30/12/20**  
-
-- Added a Snooze option (Use the -Snooze switch).  
-
-**Version 1.0 - 22/07/20**  
-
--Release
-    
-# Toast Notify 
-
-**Screenshots**  
-  
- http://byteben.com/bb/wp-content/uploads/2020/07/Toast-Example.jpg  
- http://byteben.com/bb/wp-content/uploads/2021/01/Toast-Example-Snooze.jpg  
- http://byteben.com/bb/wp-content/uploads/2020/07/Content-Example.jpg  
-   
-**Description**  
-  
-The "Toast Notify" solution will pop a notification toast from the system tray in Windows 10 (See Toast-Example.jpg). This project was born out of the desire for me to understand Toast Notifications better and seek to replace a 3rd party desktop notification solution. The titles, texts and action button are customisable via an XML document.  
-  
-Toast_Notify.ps1 is a script designed to be deployed as a package from MEMCM. The "Set and forget" mentality of packages works really well because we don't need to specify a detection method once the script has run.  
-  
-Toast_Notify.ps1 will read an XML file on a file share or from the same directory. If the XML is stored on a fileserver, the Toast Notifications can be changed "on the fly" without having to repackage the script. 
-To create a custom XML, copy CustomMessage.xml and edit the text you want to display in the toast notification. Place the modified XML in the script directory or on a fileserver. Call your custom file using one of the script parameters below.  
-  
-**Points to Consider**  
-  
-I am using an existing app in Windows to call the Toasts. This script creates two buttons in the Toast, "Details" and "Dismiss". Cicking details is designed to take the user to an internal Service Desk announcement page. For that reason, **MSEdge** works really well because the Toast Action launches the browser in the foreground. Oh, you will need MSEdge installed on your client computers for this to work.  
-
-The following files should be present in the Script Directory when you create the package in MEMCM:-   
-  
-**Toast_Notify.ps1  
-BadgeImage.jpg  
-HeroImage.jpg (364 x 180px, 3MB Normal Connection / 1MB Metered Connection)  
-CustomMessage.xml**  
-  
-More information and Toast Content guidelines can be found at:-    
-https://docs.microsoft.com/en-us/windows/uwp/design/shell/tiles-and-notifications/toast-ux-guidance  
-  
-**Parameters**  
-If you specify no parameter for XMLSource the script will read the CustomMessage.xml in the script root.  
-  
 **.PARAMETER XMLSource**
 
-Specify the name of the XML file to read. The XML file must exist in the same directory as Toast_Notify.ps1. If no parameter is passed, it is assumed the XML file is called CustomMessage.xml.
+Name of the XML configuration file. Must be in the same directory as `Toast_Notify.ps1` or a full path.
 
-**.PARAMETER ToastScenario**
-
-Controls the toast notification priority and behavior. Valid values:
-- **alarm** (default): High priority with looping alarm sound. Stays on screen until dismissed. Best for critical alerts requiring immediate attention.
-- **urgent**: High priority notification that demands immediate attention but with a single notification sound.
-- **reminder**: Standard priority with persistent display. Toast stays visible and shows in Action Center. Good for important but non-critical messages.
-- **default**: Standard Windows notification behavior with normal priority and automatic dismissal.
-
-If no parameter is passed, the toast uses the 'alarm' scenario for maximum visibility.
+- Default: `CustomMessage.xml`
+- Example: `-XMLSource "BIOS_Update.xml"`
 
 **.PARAMETER Snooze**
 
-Adds a snooze dropdown with predefined intervals (1 minute, 30 minutes, 1 hour, 2 hours, 4 hours). Users can postpone the notification and it will reappear after the selected interval.
+Enable progressive enforcement mode. The notification will escalate through Stages 0-4. Without `-Snooze`, a one-time toast is displayed with no escalation.
 
-**.EXAMPLE**
+**.PARAMETER ToastGUID**
 
-Toast_Notify.ps1 -XMLSource "PhoneSystemProblems.xml"
+Unique identifier for this notification campaign. Used to namespace registry state, scheduled tasks, and log files. Auto-generated if not specified.
 
-**.EXAMPLE**
+- Format: Standard GUID (e.g. `A1B2C3D4-E5F6-7890-ABCD-EF1234567890`)
+- Tip: Use a fixed GUID per campaign so state persists across deployments.
 
-Toast_Notify.ps1 -ToastScenario "urgent"
+**.PARAMETER AppIDName**
 
-**.EXAMPLE**
+Display name shown in the Windows notification system (Action Center, notification history).
 
-Toast_Notify.ps1 -XMLSource "Maintenance.xml" -ToastScenario "reminder" -Snooze
+- Default: `System IT`
+- Max length: 128 characters
 
-**.EXAMPLE**
+**.PARAMETER RebootCountdownMinutes**
 
-Toast_Notify.ps1 -Snooze
+Countdown in minutes before automatic reboot at Stage 4.
 
-### New Parameters (v2.4+)
+- Default: `5`
+- Range: 1-1440
+- The computed reboot time is shown in the Stage 4 toast text.
 
-**Registry Configuration:**
+**.PARAMETER ToastScenario**
 
-**.PARAMETER RegistryHive**
+Override the toast notification scenario. When using `-Snooze`, the scenario is set automatically per stage - this parameter only applies to non-snooze toasts.
 
-Controls where toast state is stored. Valid values:
-- **HKLM** (default): Machine-wide state. All users share the same snooze count. Requires permission grant during SYSTEM deployment. Best for ensuring machine gets rebooted regardless of user.
-- **HKCU**: Per-user state. Each user has independent snooze count. No permission issues. Best for multi-user machines.
-- **Custom**: Advanced scenario for custom registry paths. Requires manual permission management.
-
-**.PARAMETER RegistryPath**
-
-Custom registry path under the hive (default: SOFTWARE\ToastNotification). Only used when RegistryHive is Custom.
-
-**.PARAMETER WorkingDirectory**
-
-Base directory for organized folder structure. Creates `WorkingDirectory\{GUID}\Logs\` and `Scripts\` subfolders.
-- Default: `C:\ProgramData\ToastNotification`
-- All logs centralized in Logs\ subfolder
-- Handler scripts staged in Scripts\ subfolder
-- Easy cleanup: Delete entire `{GUID}` folder
-
-**.PARAMETER CleanupDaysThreshold**
-
-Number of days before stale toast folders are automatically removed (default: 30 days).
-- Prevents bloat from accumulated old toast instances
-- Runs during SYSTEM context deployment
-- Based on most recent file modification time
+- `alarm` (default): High priority, bypasses Focus Assist
+- `urgent`: High priority, bypasses Focus Assist
+- `reminder`: Standard priority, suppressed by Focus Assist
+- `default`: Standard Windows notification behaviour
 
 **.PARAMETER Dismiss**
 
-Enable dismiss (X) button in toast notification (default: hidden).
-- **Default (no -Dismiss)**: Dismiss button hidden - forces user to choose action (snooze/reboot)
-- **With -Dismiss**: Dismiss button visible - allows user to close without action
+Show the dismiss (X) button in the toast notification.
+
+- Default: hidden (forces user to choose an action)
+- With `-Dismiss`: user can close without taking action
 - Use for informational toasts or testing
 
-**.EXAMPLE - Corporate Deployment with Organized Structure**
+**.PARAMETER RegistryHive**
 
+Where toast stage state is stored.
+
+- `HKLM` (default): Machine-wide. All users share state. Requires SYSTEM deployment for permission grant. Best for enforcing machine reboot regardless of user.
+- `HKCU`: Per-user state. No permission issues. Best for multi-user machines where each user has independent state.
+- `Custom`: Advanced - use with `-RegistryPath`.
+
+**.PARAMETER RegistryPath**
+
+Custom registry path under the selected hive.
+
+- Default: `SOFTWARE\ToastNotification`
+
+**.PARAMETER WorkingDirectory**
+
+Base directory for organized folder structure. Creates `{WorkingDirectory}\{GUID}\Logs\` and `Scripts\` subfolders.
+
+- Default: `C:\ProgramData\ToastNotification`
+- All handler logs are written to the `Logs\` subfolder.
+
+**.PARAMETER CleanupDaysThreshold**
+
+Days before stale toast folders are automatically removed.
+
+- Default: `30`
+- Range: 1-365
+
+**.PARAMETER ForceDisplay**
+
+Maximum visibility mode. Forces the toast to display even under suppression conditions.
+
+**.PARAMETER Priority**
+
+High priority notification mode.
+
+**.PARAMETER AdvanceStage**
+
+Increments the stage counter before displaying. Used internally by fallback scheduled tasks - do not pass manually.
+
+---
+
+## Deployment
+
+### SCCM / Intune (SYSTEM context)
+
+Deploy as a SYSTEM-context package or script. The script detects it is running as SYSTEM and creates a scheduled task to fire in the logged-on user's interactive session.
+
+**Basic notification (no enforcement):**
 ```powershell
-# Deploy as SYSTEM with organized folder structure
-powershell.exe -ExecutionPolicy Bypass -File Toast_Notify.ps1 `
-    -EnableProgressive `
-    -RegistryHive HKLM `
-    -WorkingDirectory "C:\ProgramData\ITServices\Notifications"
-
-# Results in: C:\ProgramData\ITServices\Notifications\{GUID}\Logs\ and Scripts\
+PowerShell.exe -ExecutionPolicy Bypass -File Toast_Notify.ps1 -XMLSource "CustomMessage.xml"
 ```
 
-**.EXAMPLE - HKCU Mode (Multi-User)**
-
+**Progressive enforcement (recommended for reboot campaigns):**
 ```powershell
-# Each user has independent state, no permission issues
-powershell.exe -ExecutionPolicy Bypass -File Toast_Notify.ps1 `
-    -EnableProgressive `
+PowerShell.exe -ExecutionPolicy Bypass -File Toast_Notify.ps1 `
+    -XMLSource "BIOS_Update.xml" `
+    -ToastGUID "A1B2C3D4-E5F6-7890-ABCD-EF1234567890" `
+    -Snooze `
+    -RebootCountdownMinutes 15 `
+    -AppIDName "IT Support"
+```
+
+**Per-user state (multi-user endpoints):**
+```powershell
+PowerShell.exe -ExecutionPolicy Bypass -File Toast_Notify.ps1 `
+    -XMLSource "BIOS_Update.xml" `
+    -Snooze `
     -RegistryHive HKCU
 ```
 
-**.EXAMPLE - Informational Toast with Dismiss Button**
+### XML Configuration
 
-```powershell
-# Non-critical notification with dismiss button visible
-powershell.exe -ExecutionPolicy Bypass -File Toast_Notify.ps1 `
-    -Dismiss `
-    -XMLSource "InformationalMessage.xml"
-```
+Copy and edit `examples/CustomMessage.xml` or `src/BIOS_Update.xml`. The XML controls the toast title, body text, images, and action button URL. The `BIOS_Update.xml` demonstrates manufacturer-specific content via `{MANUFACTURER}` token replacement (HP/Lenovo/Default detection via CIM).
 
-**.EXAMPLE - Custom Cleanup Threshold**
+---
 
-```powershell
-# Aggressive cleanup: Remove toast folders older than 7 days
-powershell.exe -ExecutionPolicy Bypass -File Toast_Notify.ps1 `
-    -EnableProgressive `
-    -WorkingDirectory "C:\ProgramData\Notifications" `
-    -CleanupDaysThreshold 7
-```
+## Architecture
 
-**Troubleshooting:**
+### State Management
 
-If you encounter "Access Denied" errors when clicking snooze:
-1. Re-deploy as SYSTEM with `-RegistryHive HKLM` (automatic permission grant)
-2. Switch to HKCU mode: `-RegistryHive HKCU` (no permissions needed)
-3. See TECHNICAL_DOCUMENTATION_TOAST_v3.0.md Section 11 for detailed troubleshooting
+Stage state is stored in the registry at `HKLM:\SOFTWARE\ToastNotification\{GUID}` (or HKCU). The following values are tracked:
 
-**Known Issues** 
-  
--Images in the XML can only be read from the local file system. This is not an issue if we are deploying the package from MEMCM  
--PowerShell Window flashes before Toast when deployed in SYSTEM context  
-  
-**Inspiration, Credit and Help**  
-  
-  @guyrleech  
-  @young_robbo  
-  @mwbengtsson  
-  @ccmexec  
-  @syst_and_deploy  
-  @PaulWetter  
-  
-**Community**  
-  
-https://www.imab.dk/windows-10-toast-notification-script/  
-http://www.systanddeploy.com/2020/09/display-simple-toast-notification-with.html  
-https://github.com/Windos/BurntToast  
-https://wetterssource.com/ondemandtoast  
-https://msendpointmgr.com/2020/06/29/adding-notifications-to-win32appremedy-with-proactive-remediations/  
-https://msendpointmgr.com/2020/08/07/proactive-battery-replacement-with-endpoint-analytics/  
-  
-I welcome comments and feedback. Please fork repo to contribute
+| Value | Type | Purpose |
+|-------|------|---------|
+| SnoozeCount | DWORD | Current stage (0-4) |
+| XMLSource | String | XML file path for snooze task chain |
+| ToastScenario | String | Scenario for snooze task chain |
+| RebootCountdownMinutes | DWORD | Countdown for Stage 4 |
+
+### Scheduled Tasks
+
+When `-Snooze` is used, the following tasks are created:
+
+| Task | Creator | Purpose |
+|------|---------|---------|
+| `Toast_Notification_{GUID}` | Toast_Notify.ps1 (SYSTEM) | Main notification task |
+| `Toast_Notification_{GUID}_{Username}_Snooze{N}` | Toast_Snooze_Handler.ps1 (user) | Next snooze trigger |
+| `Toast_Notification_{GUID}_{Username}_Fallback` | Toast_Notify.ps1 (SYSTEM) | Fires if toast ignored |
+
+Snooze tasks are created dynamically in the user's interactive session (no admin rights required). Fallback tasks are created by the SYSTEM context script before the toast is shown, and cancelled by handler scripts when the user takes any action.
+
+### Protocol Handlers
+
+The following custom URI protocols are registered during SYSTEM deployment:
+
+- `toast-dismiss://` - Invoked by the Dismiss button; triggers `Toast_Dismiss_Handler.ps1`
+
+---
+
+## Files Reference
+
+| File | Version | Purpose |
+|------|---------|---------|
+| `src/Toast_Notify.ps1` | v2.31 | Main notification script |
+| `src/Toast_Snooze_Handler.ps1` | v1.11 | Snooze button handler |
+| `src/Toast_Reboot_Handler.ps1` | v1.3 | Reboot button handler |
+| `src/Toast_Dismiss_Handler.ps1` | v1.1 | Dismiss button handler |
+| `src/BIOS_Update.xml` | - | Example XML for BIOS update campaign |
+| `src/BadgeImage_HP.jpg` | - | HP badge image (replace as needed) |
+| `src/HeroImage_BIOS.jpg` | - | HP hero image (replace as needed) |
+| `examples/CustomMessage.xml` | - | Minimal XML template |
+| `docs/TECHNICAL_DOCUMENTATION_TOAST_v3.0.md` | v4.1 | Full ISO 9001 technical documentation |
+| `docs/IMAGE_CREATION_GUIDE.md` | - | Image size and format requirements |
+
+---
+
+## Requirements
+
+- Windows 10 / Windows 11
+- PowerShell 5.1 or later
+- SYSTEM context deployment (SCCM / Intune) for progressive enforcement
+- No third-party modules required
+
+---
+
+## Troubleshooting
+
+**Toast does not appear:**
+- Verify script is running in SYSTEM context (check task manager / event log)
+- Check `C:\ProgramData\ToastNotification\{GUID}\Logs\` for script output
+- Confirm a user is logged on interactively
+
+**Snooze task not created / Access Denied:**
+- Ensure deployment is from SYSTEM context (required for DACL grant)
+- Check event log for `Register-ScheduledTask` errors
+
+**Focus Assist suppressing toasts:**
+- Stages 0-4 all use `alarm` or `urgent` scenario which bypasses Focus Assist
+- If using a non-snooze toast with `-ToastScenario reminder`, this will be suppressed
+
+**Stage not advancing:**
+- Check registry `HKLM:\SOFTWARE\ToastNotification\{GUID}` for `SnoozeCount` value
+- Verify fallback task exists: `Toast_Notification_{GUID}_{Username}_Fallback`
+- See `docs/TECHNICAL_DOCUMENTATION_TOAST_v3.0.md` Section 12.17 for v2.31 fix details
+
+---
+
+## Documentation
+
+Full ISO 9001/27001 compliant technical documentation:
+`docs/TECHNICAL_DOCUMENTATION_TOAST_v3.0.md` (v4.1)
+
+Includes architecture, function reference, security assessment, code review records, and full changelog from v2.0 through v2.31.
+
+---
 
 ## License & Attribution
 
-This project is based on [Toast](https://github.com/byteben/Toast) by [Ben Whitmore](https://github.com/byteben) (@byteben), originally released under the GNU General Public License v3.
+Based on [Toast](https://github.com/byteben/Toast) by [Ben Whitmore](https://github.com/byteben) (@byteben), originally released under the GNU General Public License v3.
 
-Toast is a Windows 10/11 Enterprise Notification System providing PowerShell-based toast notifications with XML-driven customization for MEMCM/Intune deployments.
-
-This enhanced version includes:
-- Reorganized project structure (src/, examples/, assets/, docs/)
-- Snooze functionality enhancements
-- Comprehensive technical documentation
-
-All modifications are also released under GPLv3. See LICENSE file for full license terms.
-
+All modifications released under GPLv3. See LICENSE for full terms.
