@@ -5,6 +5,16 @@ Created by:   Ben Whitmore
 Filename:     Toast_Notify.ps1
 ===========================================================================
 
+Version 2.39 - 19/02/2026
+-FIX: appLogoOverride (badge/circular icon) not rendering in toast notification.
+ Root cause: $CurrentDir from Split-Path returns Windows backslash paths. The file:/// URI
+ was constructed with mixed slashes (e.g. file:///C:\path\to\Scripts/badgeimage.jpg).
+ placement="hero" is lenient and accepted mixed slashes; placement="appLogoOverride" is
+ strict and silently discarded any URI containing backslashes. The badge image never rendered.
+ Fix: $CurrentDirUri is derived from $CurrentDir with all backslashes replaced by forward
+ slashes. Both $BadgeImage and $HeroImage (including the manufacturer badge override path)
+ are now built using $CurrentDirUri, producing a well-formed file:/// URI on all systems.
+
 Version 2.38 - 19/02/2026
 -FIX: Toast app name (AppIDName) not updating in notification header.
  Root cause: $LauncherID (AUMID) was hardcoded - all deployments shared the same AUMID
@@ -1469,8 +1479,12 @@ If ($XMLValid -eq $True) {
     $ToastDuration = "long"
 
     #Images
-    $BadgeImage = "file:///$CurrentDir/badgeimage.jpg"
-    $HeroImage = "file:///$CurrentDir/heroimage.jpg"
+    # appLogoOverride requires a strict forward-slash URI; backslashes in $CurrentDir (from
+    # Split-Path) cause the badge/circular icon to silently fail. Hero image is lenient.
+    # $CurrentDirUri is used for all image file URIs to ensure both images render correctly.
+    $CurrentDirUri = $CurrentDir -replace '\\', '/'
+    $BadgeImage = "file:///$CurrentDirUri/badgeimage.jpg"
+    $HeroImage = "file:///$CurrentDirUri/heroimage.jpg"
 
     # --- Manufacturer Detection ---
     # Detect hardware vendor via CIM and select per-manufacturer config from XML.
@@ -1519,7 +1533,7 @@ If ($XMLValid -eq $True) {
             # Security: extract filename only to prevent path traversal (e.g. ../../../evil.jpg)
             $MfrBadgeSafe = [System.IO.Path]::GetFileName($MfrBadge)
             # Build file URI then XML-encode to prevent attribute injection in toast template
-            $BadgeImage = ConvertTo-XmlSafeString "file:///$CurrentDir/$MfrBadgeSafe"
+            $BadgeImage = ConvertTo-XmlSafeString "file:///$CurrentDirUri/$MfrBadgeSafe"
         }
         if (-not [string]::IsNullOrWhiteSpace($MfrButton)) { $ButtonAction = $MfrButton }
         Write-Verbose "Manufacturer config applied: BadgeImage=$MfrBadge, ButtonAction=$MfrButton"
