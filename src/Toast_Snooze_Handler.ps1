@@ -5,6 +5,11 @@ Created by:   Ben Whitmore (with AI assistance)
 Filename:     Toast_Snooze_Handler.ps1
 ===========================================================================
 
+Version 1.14 - 19/02/2026
+-FIX: Added $Priority, $ForceDisplay, $Dismiss switch parameters to param block.
+ These are now forwarded conditionally in $TaskArguments to the next Toast_Notify.ps1
+ invocation, ensuring all display-mode switches survive across snooze cycles.
+
 Version 1.13 - 19/02/2026
 -FIX: Added $AppIDName parameter (default: 'System IT', ValidateLength 1-128).
  Task arguments now forward -AppIDName to the next Toast_Notify.ps1 invocation.
@@ -177,7 +182,13 @@ Param(
     [String]$LogDirectory = $ENV:Windir + "\Temp",
     [Parameter(Mandatory = $false)]
     [ValidateLength(1, 128)]
-    [String]$AppIDName = 'System IT'
+    [String]$AppIDName = 'System IT',
+    [Parameter(Mandatory = $false)]
+    [Switch]$Priority,
+    [Parameter(Mandatory = $false)]
+    [Switch]$ForceDisplay,
+    [Parameter(Mandatory = $false)]
+    [Switch]$Dismiss
 )
 
 #region Helper Functions
@@ -502,6 +513,9 @@ try {
             " -RegistryPath `"$RegistryPath`"" +
             " -AppIDName `"$AppIDName`"" +
             " -Snooze"
+        if ($Priority) { $TaskArguments += " -Priority" }
+        if ($ForceDisplay) { $TaskArguments += " -ForceDisplay" }
+        if ($Dismiss) { $TaskArguments += " -Dismiss" }
         $TaskAction = New-ScheduledTaskAction `
             -Execute "C:\WINDOWS\system32\WindowsPowerShell\v1.0\PowerShell.exe" `
             -Argument $TaskArguments

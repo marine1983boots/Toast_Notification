@@ -5,6 +5,21 @@ Created by:   Ben Whitmore
 Filename:     Toast_Notify.ps1
 ===========================================================================
 
+Version 2.38 - 19/02/2026
+-FIX: Toast app name (AppIDName) not updating in notification header.
+ Root cause: $LauncherID (AUMID) was hardcoded - all deployments shared the same AUMID
+ regardless of -AppIDName. Windows notification platform cached the display name on first
+ use ("System IT") and did not re-read updated registry values in subsequent sessions.
+ Fix: AUMID is now built dynamically from the sanitized AppIDName value, ensuring each
+ distinct app display name gets a unique AUMID registration. No caching issue is possible
+ because Windows always reads a fresh AUMID for the first time.
+
+Version 2.37 - 19/02/2026
+-FIX: Comprehensive parameter forwarding audit - forward RebootCountdownMinutes to main scheduled
+ task unconditionally; forward Priority, ForceDisplay, and Dismiss switches through all three
+ re-invocation paths (main task, fallback task, snooze protocol handler).
+ Previously these switches were silently dropped on the first re-invocation.
+
 Version 2.36 - 19/02/2026
 -FIX: -AppIDName not forwarded in main task, fallback task, or snooze protocol command.
  Custom app display names reverted to "System IT" on every re-invocation. All three
@@ -1163,7 +1178,7 @@ function Register-ToastAppId {
 
                 # Update DisplayName if it differs from the desired value
                 if ($Existing.DisplayName -ne $AppIDDisplayName) {
-                    Write-Verbose "Updating DisplayName: '$($Existing.DisplayName)' -> '$AppIDDisplayName'"
+                    Write-Output "Updating AppID DisplayName: '$($Existing.DisplayName)' -> '$AppIDDisplayName'"
                     Set-ItemProperty -Path $RegPath -Name "DisplayName" -Value $AppIDDisplayName -Type String -ErrorAction Stop
                 }
 
@@ -1520,8 +1535,14 @@ If ($XMLValid -eq $True) {
     Write-Verbose "AppIDDisplayName: $AppIDDisplayName"
 
     #Set COM App ID for toast notifications
-    # Use custom AppId following BurntToast approach for reliability
-    $LauncherID = "ToastNotification.PowerShell.{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}"
+    # Build AUMID dynamically from AppIDName so each display name gets its own registration.
+    # This avoids Windows notification platform caching the old display name for a shared AUMID.
+    $SanitizedAppIDName = $AppIDName -replace '[^a-zA-Z0-9]', ''
+    if ([string]::IsNullOrEmpty($SanitizedAppIDName)) {
+        $SanitizedAppIDName = 'Default'
+        Write-Warning "AppIDName '$AppIDName' contains no alphanumeric characters - using 'Default' for AUMID"
+    }
+    $LauncherID = "ToastNotification.$SanitizedAppIDName.{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}"
 
     #Dont Create a Scheduled Task if the script is running in the context of the logged on user, only if SYSTEM fired the script i.e. Deployment from Intune/ConfigMgr
     If (([System.Security.Principal.WindowsIdentity]::GetCurrent()).Name -eq "NT AUTHORITY\SYSTEM") {
@@ -1694,6 +1715,9 @@ If ($XMLValid -eq $True) {
 
                 # Build command with registry and log parameters
                 $CommandParams = "-ProtocolUri `"%1`" -RegistryHive $RegistryHive -RegistryPath `"$RegistryPath`" -AppIDName `"$AppIDName`" -LogDirectory `"$($FolderStructure.Logs)`""
+                If ($Priority) { $CommandParams += " -Priority" }
+                If ($ForceDisplay) { $CommandParams += " -ForceDisplay" }
+                If ($Dismiss) { $CommandParams += " -Dismiss" }
                 $CommandValue = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$HandlerPath`" $CommandParams"
                 Set-ItemProperty -Path $CommandKey -Name "(Default)" -Value $CommandValue -Force
 
@@ -1782,7 +1806,7 @@ If ($XMLValid -eq $True) {
         $Task_Expiry = (Get-Date).AddSeconds(120).ToString('s')
 
         #Build arguments string with optional parameters
-        $TaskArguments = "-NoProfile -WindowStyle Hidden -File ""$New_ToastPath"" -ToastGUID ""$ToastGUID"" -XMLSource ""$XMLSource"" -ToastScenario ""$ToastScenario"" -RegistryHive ""$RegistryHive"" -RegistryPath ""$RegistryPath"" -AppIDName ""$AppIDName"""
+        $TaskArguments = "-NoProfile -WindowStyle Hidden -File ""$New_ToastPath"" -ToastGUID ""$ToastGUID"" -XMLSource ""$XMLSource"" -ToastScenario ""$ToastScenario"" -RebootCountdownMinutes $RebootCountdownMinutes -RegistryHive ""$RegistryHive"" -RegistryPath ""$RegistryPath"" -AppIDName ""$AppIDName"""
         If ($Snooze) {
             $TaskArguments += " -Snooze"
         }
@@ -1791,6 +1815,9 @@ If ($XMLValid -eq $True) {
         }
         If ($ForceDisplay) {
             $TaskArguments += " -ForceDisplay"
+        }
+        If ($Dismiss) {
+            $TaskArguments += " -Dismiss"
         }
         $Task_Action = New-ScheduledTaskAction -Execute "C:\WINDOWS\system32\WindowsPowerShell\v1.0\PowerShell.exe" -Argument $TaskArguments
         $Task_Trigger = New-ScheduledTaskTrigger -Once -At $Task_TimeToRun
@@ -2028,6 +2055,9 @@ If ($XMLValid -eq $True) {
                         " -RegistryHive `"$RegistryHive`"" +
                         " -RegistryPath `"$RegistryPath`"" +
                         " -AppIDName `"$AppIDName`"" +
+                        "$(if ($Priority) { ' -Priority' } else { '' })" +
+                        "$(if ($ForceDisplay) { ' -ForceDisplay' } else { '' })" +
+                        "$(if ($Dismiss) { ' -Dismiss' } else { '' })" +
                         " -Snooze" +
                         $FallbackAdvanceStage
 
