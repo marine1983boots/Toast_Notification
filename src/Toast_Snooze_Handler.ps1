@@ -5,6 +5,23 @@ Created by:   Ben Whitmore (with AI assistance)
 Filename:     Toast_Snooze_Handler.ps1
 ===========================================================================
 
+Version 1.14 - 19/02/2026
+-FIX: Added $Priority, $ForceDisplay, $Dismiss switch parameters to param block.
+ These are now forwarded conditionally in $TaskArguments to the next Toast_Notify.ps1
+ invocation, ensuring all display-mode switches survive across snooze cycles.
+
+Version 1.13 - 19/02/2026
+-FIX: Added $AppIDName parameter (default: 'System IT', ValidateLength 1-128).
+ Task arguments now forward -AppIDName to the next Toast_Notify.ps1 invocation.
+ Custom app display names were silently dropped, reverting to "System IT" on
+ every snooze re-invocation.
+
+Version 1.12 - 19/02/2026
+-FIX: Task arguments now forward -RegistryHive and -RegistryPath to Toast_Notify.ps1
+ invocation, ensuring custom registry paths are preserved across snooze cycles.
+ Previously the re-invoked script defaulted to SOFTWARE\ToastNotification, read
+ no state, and always showed Stage 0 (2hr button) regardless of actual SnoozeCount.
+
 Version 1.11 - 18/02/2026
 -RebootCountdownMinutes now read from HKLM registry (stored by Toast_Notify.ps1 v2.30)
 -RebootCountdownMinutes now included in snooze task action arguments
@@ -162,7 +179,16 @@ Param(
     [Parameter(Mandatory = $false)]
     [String]$RegistryPath = 'SOFTWARE\ToastNotification',
     [Parameter(Mandatory = $false)]
-    [String]$LogDirectory = $ENV:Windir + "\Temp"
+    [String]$LogDirectory = $ENV:Windir + "\Temp",
+    [Parameter(Mandatory = $false)]
+    [ValidateLength(1, 128)]
+    [String]$AppIDName = 'System IT',
+    [Parameter(Mandatory = $false)]
+    [Switch]$Priority,
+    [Parameter(Mandatory = $false)]
+    [Switch]$ForceDisplay,
+    [Parameter(Mandatory = $false)]
+    [Switch]$Dismiss
 )
 
 #region Helper Functions
@@ -483,7 +509,13 @@ try {
             " -XMLSource `"$StoredXMLSource`"" +
             " -ToastScenario `"$StoredToastScenario`"" +
             " -RebootCountdownMinutes $StoredRebootCountdownMinutes" +
+            " -RegistryHive `"$RegistryHive`"" +
+            " -RegistryPath `"$RegistryPath`"" +
+            " -AppIDName `"$AppIDName`"" +
             " -Snooze"
+        if ($Priority) { $TaskArguments += " -Priority" }
+        if ($ForceDisplay) { $TaskArguments += " -ForceDisplay" }
+        if ($Dismiss) { $TaskArguments += " -Dismiss" }
         $TaskAction = New-ScheduledTaskAction `
             -Execute "C:\WINDOWS\system32\WindowsPowerShell\v1.0\PowerShell.exe" `
             -Argument $TaskArguments

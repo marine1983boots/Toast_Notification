@@ -5,6 +5,53 @@ Created by:   Ben Whitmore
 Filename:     Toast_Notify.ps1
 ===========================================================================
 
+Version 2.38 - 19/02/2026
+-FIX: Toast app name (AppIDName) not updating in notification header.
+ Root cause: $LauncherID (AUMID) was hardcoded - all deployments shared the same AUMID
+ regardless of -AppIDName. Windows notification platform cached the display name on first
+ use ("System IT") and did not re-read updated registry values in subsequent sessions.
+ Fix: AUMID is now built dynamically from the sanitized AppIDName value, ensuring each
+ distinct app display name gets a unique AUMID registration. No caching issue is possible
+ because Windows always reads a fresh AUMID for the first time.
+
+Version 2.37 - 19/02/2026
+-FIX: Comprehensive parameter forwarding audit - forward RebootCountdownMinutes to main scheduled
+ task unconditionally; forward Priority, ForceDisplay, and Dismiss switches through all three
+ re-invocation paths (main task, fallback task, snooze protocol handler).
+ Previously these switches were silently dropped on the first re-invocation.
+
+Version 2.36 - 19/02/2026
+-FIX: -AppIDName not forwarded in main task, fallback task, or snooze protocol command.
+ Custom app display names reverted to "System IT" on every re-invocation. All three
+ argument strings now explicitly forward -AppIDName. Main task also now forwards
+ -RegistryHive and -RegistryPath (previously missing alongside AppIDName).
+
+Version 2.35 - 19/02/2026
+-FIX: Fallback task arguments now forward -RegistryHive and -RegistryPath to the
+ re-invoked Toast_Notify.ps1. Custom registry paths were silently dropped, causing
+ every fallback-triggered toast to read from default SOFTWARE\ToastNotification
+ (path not found), default to SnoozeCount=0, and display Stage 0 indefinitely.
+
+Version 2.34 - 19/02/2026
+-FIX: Grant-RegistryPermissions ValidatePattern hardcoded to SOFTWARE\ToastNotification,
+ blocking any custom -RegistryPath. Pattern now accepts any HKLM\{path}\{GUID} structure.
+ Parent path security check now derived dynamically from input. $RegPath construction in
+ SYSTEM block now uses $RegistryHive variable instead of hardcoded HKLM.
+
+Version 2.33 - 19/02/2026
+-FIX: Initialize-ToastRegistry fails to create base registry path when intermediate keys are missing
+ (New-Item -Path $BasePath -Force now used instead of Split-Path dance; registry provider -Force
+  flag creates all intermediate keys recursively, fixing "path not found" on custom -RegistryPath)
+
+Version 2.32 - 18/02/2026
+-FIX: HKLM registry cleanup failure after Reboot/Dismiss button click
+-Handlers (v1.4/v1.2) now write Completed=1 value instead of deleting the key
+ (user context lacks KEY_WRITE on parent key, making Remove-Item fail with Access Denied)
+-USER context: Added Completed=1 check before display - exits early if flag is set
+ (prevents toast reappearing after reboot when user already acted)
+-SYSTEM context: Added orphan cleanup pass before Initialize-ToastRegistry
+ (deletes GUID keys with Completed=1 on each new deployment)
+
 Version 2.31 - 18/02/2026
 -FallbackAdvanceStage now always passes -AdvanceStage to fallback tasks (Stages 0-2 previously
  re-fired at same stage indefinitely; users who ignored toasts would never reach Stage 4)
@@ -512,9 +559,7 @@ function Initialize-ToastRegistry {
     try {
         # Create base path if not exists
         if (!(Test-Path $BasePath)) {
-            $ParentPath = Split-Path $BasePath -Parent
-            $LeafName = Split-Path $RegistryPath -Leaf
-            New-Item -Path $ParentPath -Name $LeafName -Force | Out-Null
+            New-Item -Path $BasePath -Force | Out-Null
         }
 
         # Create toast-specific path
@@ -739,12 +784,12 @@ function Grant-RegistryPermissions {
         Grant-RegistryPermissions -RegistryPath "HKLM:\SOFTWARE\ToastNotification\ABC-123"
         Grants USERS write access ONLY to the ABC-123 toast instance path
     .NOTES
-        Security validation ensures only ToastNotification\{GUID} paths can be modified
+        Security validation ensures only HKLM\{custom-path}\{GUID} paths can be modified
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [ValidatePattern('^HKLM:\\SOFTWARE\\ToastNotification\\[A-F0-9\-]{1,36}$')]
+        [ValidatePattern('^HKLM:\\[a-zA-Z0-9_\\]+\\[A-F0-9\-]{1,36}$')]
         [String]$RegistryPath
     )
 
@@ -770,7 +815,7 @@ function Grant-RegistryPermissions {
         Set-Acl -Path $RegistryPath -AclObject $Acl
 
         # Verify scope - ensure parent path permissions unchanged
-        $ParentPath = "HKLM:\SOFTWARE\ToastNotification"
+        $ParentPath = Split-Path $RegistryPath -Parent
         if (Test-Path $ParentPath) {
             $ParentAcl = Get-Acl -Path $ParentPath
             $ParentUserRules = $ParentAcl.Access | Where-Object { $_.IdentityReference -eq "BUILTIN\Users" }
@@ -780,7 +825,7 @@ function Grant-RegistryPermissions {
         }
 
         Write-Output "[OK] Registry permissions granted to USERS group for THIS PATH ONLY: $RegistryPath"
-        Write-Output "[OK] Parent path (SOFTWARE\ToastNotification) remains protected"
+        Write-Output "[OK] Parent path ($ParentPath) remains protected"
         return $true
     }
     catch {
@@ -1133,7 +1178,7 @@ function Register-ToastAppId {
 
                 # Update DisplayName if it differs from the desired value
                 if ($Existing.DisplayName -ne $AppIDDisplayName) {
-                    Write-Verbose "Updating DisplayName: '$($Existing.DisplayName)' -> '$AppIDDisplayName'"
+                    Write-Output "Updating AppID DisplayName: '$($Existing.DisplayName)' -> '$AppIDDisplayName'"
                     Set-ItemProperty -Path $RegPath -Name "DisplayName" -Value $AppIDDisplayName -Type String -ErrorAction Stop
                 }
 
@@ -1490,8 +1535,14 @@ If ($XMLValid -eq $True) {
     Write-Verbose "AppIDDisplayName: $AppIDDisplayName"
 
     #Set COM App ID for toast notifications
-    # Use custom AppId following BurntToast approach for reliability
-    $LauncherID = "ToastNotification.PowerShell.{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}"
+    # Build AUMID dynamically from AppIDName so each display name gets its own registration.
+    # This avoids Windows notification platform caching the old display name for a shared AUMID.
+    $SanitizedAppIDName = $AppIDName -replace '[^a-zA-Z0-9]', ''
+    if ([string]::IsNullOrEmpty($SanitizedAppIDName)) {
+        $SanitizedAppIDName = 'Default'
+        Write-Warning "AppIDName '$AppIDName' contains no alphanumeric characters - using 'Default' for AUMID"
+    }
+    $LauncherID = "ToastNotification.$SanitizedAppIDName.{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}"
 
     #Dont Create a Scheduled Task if the script is running in the context of the logged on user, only if SYSTEM fired the script i.e. Deployment from Intune/ConfigMgr
     If (([System.Security.Principal.WindowsIdentity]::GetCurrent()).Name -eq "NT AUTHORITY\SYSTEM") {
@@ -1500,6 +1551,25 @@ If ($XMLValid -eq $True) {
 
         #Initialize Registry State if snooze mode enabled
         If ($Snooze) {
+
+            # Cleanup pass: Delete any previously completed toast keys (Completed=1 set by user handlers)
+            # User context cannot delete HKLM keys; SYSTEM context can. Runs on each new deployment.
+            $CleanupBasePath = "HKLM:\${RegistryPath}"
+            if (Test-Path $CleanupBasePath) {
+                try {
+                    Get-ChildItem -Path $CleanupBasePath -ErrorAction SilentlyContinue | ForEach-Object {
+                        $CompletedState = Get-ItemProperty -Path $_.PSPath -ErrorAction SilentlyContinue
+                        if ($CompletedState -and $CompletedState.Completed -eq 1) {
+                            Remove-Item -Path $_.PSPath -Recurse -Force -ErrorAction SilentlyContinue
+                            Write-Output "[OK] SYSTEM cleanup: Removed completed toast key: $($_.PSChildName)"
+                        }
+                    }
+                }
+                catch {
+                    Write-Warning "Completed key cleanup scan failed (non-fatal): $($_.Exception.Message)"
+                }
+            }
+
             Write-Output "Initializing registry for ToastGUID: $ToastGUID"
             $RegInitResult = Initialize-ToastRegistry -ToastGUID $ToastGUID -RegistryHive $RegistryHive -RegistryPath $RegistryPath
             if (!$RegInitResult) {
@@ -1542,7 +1612,7 @@ If ($XMLValid -eq $True) {
             # Grant permissions if using HKLM (machine-wide state)
             if ($RegistryHive -eq 'HKLM') {
                 Write-Output "Granting USERS group permissions to registry path for snooze handler..."
-                $RegPath = "HKLM:\${RegistryPath}\$ToastGUID"
+                $RegPath = "${RegistryHive}:\${RegistryPath}\$ToastGUID"
                 $PermissionResult = Grant-RegistryPermissions -RegistryPath $RegPath
                 if ($PermissionResult) {
                     Write-Output "[OK] Registry permissions granted - Snooze handler will work from user context"
@@ -1644,7 +1714,10 @@ If ($XMLValid -eq $True) {
                 $CommandKey = "Registry::HKEY_CLASSES_ROOT\toast-snooze\shell\open\command"
 
                 # Build command with registry and log parameters
-                $CommandParams = "-ProtocolUri `"%1`" -RegistryHive $RegistryHive -RegistryPath `"$RegistryPath`" -LogDirectory `"$($FolderStructure.Logs)`""
+                $CommandParams = "-ProtocolUri `"%1`" -RegistryHive $RegistryHive -RegistryPath `"$RegistryPath`" -AppIDName `"$AppIDName`" -LogDirectory `"$($FolderStructure.Logs)`""
+                If ($Priority) { $CommandParams += " -Priority" }
+                If ($ForceDisplay) { $CommandParams += " -ForceDisplay" }
+                If ($Dismiss) { $CommandParams += " -Dismiss" }
                 $CommandValue = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$HandlerPath`" $CommandParams"
                 Set-ItemProperty -Path $CommandKey -Name "(Default)" -Value $CommandValue -Force
 
@@ -1733,7 +1806,7 @@ If ($XMLValid -eq $True) {
         $Task_Expiry = (Get-Date).AddSeconds(120).ToString('s')
 
         #Build arguments string with optional parameters
-        $TaskArguments = "-NoProfile -WindowStyle Hidden -File ""$New_ToastPath"" -ToastGUID ""$ToastGUID"" -XMLSource ""$XMLSource"" -ToastScenario ""$ToastScenario"""
+        $TaskArguments = "-NoProfile -WindowStyle Hidden -File ""$New_ToastPath"" -ToastGUID ""$ToastGUID"" -XMLSource ""$XMLSource"" -ToastScenario ""$ToastScenario"" -RebootCountdownMinutes $RebootCountdownMinutes -RegistryHive ""$RegistryHive"" -RegistryPath ""$RegistryPath"" -AppIDName ""$AppIDName"""
         If ($Snooze) {
             $TaskArguments += " -Snooze"
         }
@@ -1742,6 +1815,9 @@ If ($XMLValid -eq $True) {
         }
         If ($ForceDisplay) {
             $TaskArguments += " -ForceDisplay"
+        }
+        If ($Dismiss) {
+            $TaskArguments += " -Dismiss"
         }
         $Task_Action = New-ScheduledTaskAction -Execute "C:\WINDOWS\system32\WindowsPowerShell\v1.0\PowerShell.exe" -Argument $TaskArguments
         $Task_Trigger = New-ScheduledTaskTrigger -Once -At $Task_TimeToRun
@@ -1777,6 +1853,14 @@ If ($XMLValid -eq $True) {
             if ($RegState) {
                 $SnoozeCount = $RegState.SnoozeCount
                 Write-Output "Registry SnoozeCount: $SnoozeCount (Source: Registry)"
+
+                # Exit without displaying if reboot/dismiss was already taken (Completed flag set by handler)
+                # Prevents toast reappearing after reboot when HKLM key deletion failed from user context.
+                if ($RegState.Completed -eq 1) {
+                    Write-Output "[OK] Toast $ToastGUID is marked Completed - user action already taken. Exiting without display."
+                    Stop-Transcript
+                    exit 0
+                }
             }
             else {
                 Write-Warning "Registry state not found for ToastGUID: $ToastGUID - using default SnoozeCount: 0"
@@ -1968,6 +2052,12 @@ If ($XMLValid -eq $True) {
                         " -XMLSource `"$XMLSource`"" +
                         " -ToastScenario `"$ToastScenario`"" +
                         " -RebootCountdownMinutes $RebootCountdownMinutes" +
+                        " -RegistryHive `"$RegistryHive`"" +
+                        " -RegistryPath `"$RegistryPath`"" +
+                        " -AppIDName `"$AppIDName`"" +
+                        "$(if ($Priority) { ' -Priority' } else { '' })" +
+                        "$(if ($ForceDisplay) { ' -ForceDisplay' } else { '' })" +
+                        "$(if ($Dismiss) { ' -Dismiss' } else { '' })" +
                         " -Snooze" +
                         $FallbackAdvanceStage
 
