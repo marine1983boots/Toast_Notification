@@ -5,6 +5,12 @@ Created by:   Ben Whitmore (with AI assistance)
 Filename:     Toast_Snooze_Handler.ps1
 ===========================================================================
 
+Version 1.13 - 19/02/2026
+-FIX: Added $AppIDName parameter (default: 'System IT', ValidateLength 1-128).
+ Task arguments now forward -AppIDName to the next Toast_Notify.ps1 invocation.
+ Custom app display names were silently dropped, reverting to "System IT" on
+ every snooze re-invocation.
+
 Version 1.12 - 19/02/2026
 -FIX: Task arguments now forward -RegistryHive and -RegistryPath to Toast_Notify.ps1
  invocation, ensuring custom registry paths are preserved across snooze cycles.
@@ -168,7 +174,10 @@ Param(
     [Parameter(Mandatory = $false)]
     [String]$RegistryPath = 'SOFTWARE\ToastNotification',
     [Parameter(Mandatory = $false)]
-    [String]$LogDirectory = $ENV:Windir + "\Temp"
+    [String]$LogDirectory = $ENV:Windir + "\Temp",
+    [Parameter(Mandatory = $false)]
+    [ValidateLength(1, 128)]
+    [String]$AppIDName = 'System IT'
 )
 
 #region Helper Functions
@@ -491,6 +500,7 @@ try {
             " -RebootCountdownMinutes $StoredRebootCountdownMinutes" +
             " -RegistryHive `"$RegistryHive`"" +
             " -RegistryPath `"$RegistryPath`"" +
+            " -AppIDName `"$AppIDName`"" +
             " -Snooze"
         $TaskAction = New-ScheduledTaskAction `
             -Execute "C:\WINDOWS\system32\WindowsPowerShell\v1.0\PowerShell.exe" `

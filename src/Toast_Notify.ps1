@@ -5,6 +5,12 @@ Created by:   Ben Whitmore
 Filename:     Toast_Notify.ps1
 ===========================================================================
 
+Version 2.36 - 19/02/2026
+-FIX: -AppIDName not forwarded in main task, fallback task, or snooze protocol command.
+ Custom app display names reverted to "System IT" on every re-invocation. All three
+ argument strings now explicitly forward -AppIDName. Main task also now forwards
+ -RegistryHive and -RegistryPath (previously missing alongside AppIDName).
+
 Version 2.35 - 19/02/2026
 -FIX: Fallback task arguments now forward -RegistryHive and -RegistryPath to the
  re-invoked Toast_Notify.ps1. Custom registry paths were silently dropped, causing
@@ -1687,7 +1693,7 @@ If ($XMLValid -eq $True) {
                 $CommandKey = "Registry::HKEY_CLASSES_ROOT\toast-snooze\shell\open\command"
 
                 # Build command with registry and log parameters
-                $CommandParams = "-ProtocolUri `"%1`" -RegistryHive $RegistryHive -RegistryPath `"$RegistryPath`" -LogDirectory `"$($FolderStructure.Logs)`""
+                $CommandParams = "-ProtocolUri `"%1`" -RegistryHive $RegistryHive -RegistryPath `"$RegistryPath`" -AppIDName `"$AppIDName`" -LogDirectory `"$($FolderStructure.Logs)`""
                 $CommandValue = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$HandlerPath`" $CommandParams"
                 Set-ItemProperty -Path $CommandKey -Name "(Default)" -Value $CommandValue -Force
 
@@ -1776,7 +1782,7 @@ If ($XMLValid -eq $True) {
         $Task_Expiry = (Get-Date).AddSeconds(120).ToString('s')
 
         #Build arguments string with optional parameters
-        $TaskArguments = "-NoProfile -WindowStyle Hidden -File ""$New_ToastPath"" -ToastGUID ""$ToastGUID"" -XMLSource ""$XMLSource"" -ToastScenario ""$ToastScenario"""
+        $TaskArguments = "-NoProfile -WindowStyle Hidden -File ""$New_ToastPath"" -ToastGUID ""$ToastGUID"" -XMLSource ""$XMLSource"" -ToastScenario ""$ToastScenario"" -RegistryHive ""$RegistryHive"" -RegistryPath ""$RegistryPath"" -AppIDName ""$AppIDName"""
         If ($Snooze) {
             $TaskArguments += " -Snooze"
         }
@@ -2021,6 +2027,7 @@ If ($XMLValid -eq $True) {
                         " -RebootCountdownMinutes $RebootCountdownMinutes" +
                         " -RegistryHive `"$RegistryHive`"" +
                         " -RegistryPath `"$RegistryPath`"" +
+                        " -AppIDName `"$AppIDName`"" +
                         " -Snooze" +
                         $FallbackAdvanceStage
 
