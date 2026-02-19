@@ -27,7 +27,6 @@
     <Signature>IT Security &amp; Compliance Team</Signature>
 
     <!-- Event title (bold heading in detail section) -->
-    <!-- {MANUFACTURER} is replaced at runtime with HP, Lenovo, or the detected vendor name -->
     <EventTitle>{MANUFACTURER} BIOS Firmware Update</EventTitle>
 
     <!-- Event text (stage-specific messages with escalating urgency) -->
@@ -56,24 +55,4 @@
     <!-- Hero image: Banner image (364x180 pixels recommended) -->
     <HeroImage>HeroImage_BIOS.jpg</HeroImage>
 
-    <!--
-        Manufacturer-specific configuration.
-        At runtime the script detects the hardware vendor via Win32_ComputerSystemProduct.Vendor,
-        selects the matching node, and overrides BadgeImage and ButtonAction.
-        To add a new vendor: add a child node here and one switch case in Toast_Notify.ps1.
-    -->
-    <ManufacturerConfig>
-        <HP>
-            <BadgeImage>BadgeImage_HP.jpg</BadgeImage>
-            <ButtonAction>https://support.hp.com/bios-updates</ButtonAction>
-        </HP>
-        <Lenovo>
-            <BadgeImage>BadgeImage_Lenovo.jpg</BadgeImage>
-            <ButtonAction>https://support.lenovo.com/us/en/solutions/ht500090</ButtonAction>
-        </Lenovo>
-        <Default>
-            <BadgeImage>BadgeImage_HP.jpg</BadgeImage>
-            <ButtonAction>https://support.hp.com/bios-updates</ButtonAction>
-        </Default>
-    </ManufacturerConfig>
 </ToastContent>

@@ -5,6 +5,27 @@ Created by:   Ben Whitmore
 Filename:     Toast_Notify.ps1
 ===========================================================================
 
+Version 2.41 - 19/02/2026
+-ADD: Restore -Manufacturer string parameter (ValidateLength 0-64, default ""). When supplied,
+ replaces {MANUFACTURER} tokens in EventTitle, ToastTitle, and EventText at runtime, allowing
+ call-time customisation (e.g. "HP BIOS Firmware Update" vs "Lenovo BIOS Firmware Update").
+ When omitted, {MANUFACTURER} tokens are stripped cleanly from output text. No CIM detection.
+
+Version 2.40 - 19/02/2026
+-CHANGE: BadgeImage and HeroImage now read from XML top-level nodes instead of being
+ hardcoded. ManufacturerConfig detection removed (was silently failing when manufacturer-
+ specific image files did not exist). {MANUFACTURER} token replacement removed.
+
+Version 2.39 - 19/02/2026
+-FIX: appLogoOverride (badge/circular icon) not rendering in toast notification.
+ Root cause: $CurrentDir from Split-Path returns Windows backslash paths. The file:/// URI
+ was constructed with mixed slashes (e.g. file:///C:\path\to\Scripts/badgeimage.jpg).
+ placement="hero" is lenient and accepted mixed slashes; placement="appLogoOverride" is
+ strict and silently discarded any URI containing backslashes. The badge image never rendered.
+ Fix: $CurrentDirUri is derived from $CurrentDir with all backslashes replaced by forward
+ slashes. Both $BadgeImage and $HeroImage (including the manufacturer badge override path)
+ are now built using $CurrentDirUri, producing a well-formed file:/// URI on all systems.
+
 Version 2.38 - 19/02/2026
 -FIX: Toast app name (AppIDName) not updating in notification header.
  Root cause: $LauncherID (AUMID) was hardcoded - all deployments shared the same AUMID
@@ -403,6 +424,12 @@ configuration. Used by Stage 3 fallback tasks to advance to Stage 4 (auto-reboot
 user has not rebooted after the final warning period expires.
 Default: $false
 
+.PARAMETER Manufacturer
+Optional OEM manufacturer name (e.g. "HP", "Lenovo", "Dell"). Replaces {MANUFACTURER} tokens
+in EventTitle, ToastTitle, and EventText loaded from the XML config file at runtime. If not
+supplied or empty, {MANUFACTURER} tokens are stripped cleanly from the output text.
+Default: "" (empty - tokens stripped)
+
 .EXAMPLE
 Toast_Notify.ps1 -XMLSource "PhoneSystemProblems.xml"
 
@@ -484,7 +511,10 @@ Param
     [ValidateLength(1, 128)]
     [String]$AppIDName = "System IT",
     [Parameter(Mandatory = $False)]
-    [Switch]$AdvanceStage = $false
+    [Switch]$AdvanceStage = $false,
+    [Parameter(Mandatory = $False)]
+    [ValidateLength(0, 64)]
+    [String]$Manufacturer = ""
 )
 
 #region Helper Functions
@@ -1469,70 +1499,46 @@ If ($XMLValid -eq $True) {
     $ToastDuration = "long"
 
     #Images
-    $BadgeImage = "file:///$CurrentDir/badgeimage.jpg"
-    $HeroImage = "file:///$CurrentDir/heroimage.jpg"
+    # Use forward-slash URI paths - appLogoOverride is strict RFC 3986 (no backslashes).
+    $CurrentDirUri = $CurrentDir -replace '\\', '/'
 
-    # --- Manufacturer Detection ---
-    # Detect hardware vendor via CIM and select per-manufacturer config from XML.
-    # Supported: HP, Lenovo. Unknown vendors fall back to Default config.
-    $DetectedManufacturer = 'Default'
-    try {
-        $RawManufacturer = (Get-CimInstance -ClassName Win32_ComputerSystemProduct -ErrorAction Stop).Vendor
-        Write-Verbose "Raw manufacturer string: $RawManufacturer"
-    }
-    catch {
-        $RawManufacturer = 'Unknown'
-        Write-Warning "Could not detect manufacturer via CIM. Defaulting to generic config. Error: $($_.Exception.Message)"
-    }
+    # Read image filenames from XML top-level nodes (with safe filename extraction to
+    # prevent path traversal) and fall back to defaults if nodes are absent.
+    $XmlBadgeImage = [string]$XMLToast.ToastContent.BadgeImage
+    $XmlHeroImage  = [string]$XMLToast.ToastContent.HeroImage
 
-    # NOTE: Each case below MUST have a corresponding XML node in <ManufacturerConfig>
-    # inside BIOS_Update.xml. Supported: HP, Lenovo, Default.
-    # If detected manufacturer has no matching XML node the code falls back to Default.
-    # To add a vendor: add a switch case here and a child node in the XML.
-    switch -Regex ($RawManufacturer) {
-        '(?i)HP|Hewlett' {
-            $DetectedManufacturer = 'HP'
-            Write-Verbose "Manufacturer resolved: HP"
-        }
-        '(?i)Lenovo' {
-            $DetectedManufacturer = 'Lenovo'
-            Write-Verbose "Manufacturer resolved: Lenovo"
-        }
-        default {
-            $DetectedManufacturer = 'Default'
-            Write-Verbose "Manufacturer unrecognised ($RawManufacturer) - using Default config"
-        }
+    if (-not [string]::IsNullOrWhiteSpace($XmlBadgeImage)) {
+        $BadgeFileSafe = [System.IO.Path]::GetFileName($XmlBadgeImage)
+        $BadgeImage = "file:///$CurrentDirUri/$BadgeFileSafe"
+    }
+    else {
+        $BadgeImage = "file:///$CurrentDirUri/badgeimage.jpg"
     }
 
-    # Apply manufacturer-specific asset overrides from XML ManufacturerConfig node
-    $ManufacturerNode = $XMLToast.ToastContent.ManufacturerConfig.$DetectedManufacturer
-    if (-not $ManufacturerNode) {
-        $ManufacturerNode = $XMLToast.ToastContent.ManufacturerConfig.Default
-        Write-Verbose "ManufacturerConfig node not found for '$DetectedManufacturer' - using Default"
+    if (-not [string]::IsNullOrWhiteSpace($XmlHeroImage)) {
+        $HeroFileSafe = [System.IO.Path]::GetFileName($XmlHeroImage)
+        $HeroImage = "file:///$CurrentDirUri/$HeroFileSafe"
     }
-
-    if ($ManufacturerNode) {
-        $MfrBadge  = [string]$ManufacturerNode.BadgeImage
-        $MfrButton = [string]$ManufacturerNode.ButtonAction
-
-        if (-not [string]::IsNullOrWhiteSpace($MfrBadge)) {
-            # Security: extract filename only to prevent path traversal (e.g. ../../../evil.jpg)
-            $MfrBadgeSafe = [System.IO.Path]::GetFileName($MfrBadge)
-            # Build file URI then XML-encode to prevent attribute injection in toast template
-            $BadgeImage = ConvertTo-XmlSafeString "file:///$CurrentDir/$MfrBadgeSafe"
-        }
-        if (-not [string]::IsNullOrWhiteSpace($MfrButton)) { $ButtonAction = $MfrButton }
-        Write-Verbose "Manufacturer config applied: BadgeImage=$MfrBadge, ButtonAction=$MfrButton"
+    else {
+        $HeroImage = "file:///$CurrentDirUri/heroimage.jpg"
     }
-
-    # Replace {MANUFACTURER} token in toast header variables
-    $EventTitle = $EventTitle -replace '\{MANUFACTURER\}', $DetectedManufacturer
-    $ToastTitle = $ToastTitle -replace '\{MANUFACTURER\}', $DetectedManufacturer
-    $EventText  = $EventText  -replace '\{MANUFACTURER\}', $DetectedManufacturer
 
     # App display name: set by -AppIDName parameter (default: "System IT")
     $AppIDDisplayName = $AppIDName
     Write-Verbose "AppIDDisplayName: $AppIDDisplayName"
+
+    # Replace {MANUFACTURER} token in toast text variables
+    if (-not [string]::IsNullOrWhiteSpace($Manufacturer)) {
+        $EventTitle = $EventTitle -replace '\{MANUFACTURER\}', $Manufacturer
+        $ToastTitle = $ToastTitle -replace '\{MANUFACTURER\}', $Manufacturer
+        $EventText  = $EventText  -replace '\{MANUFACTURER\}', $Manufacturer
+    }
+    else {
+        # No manufacturer supplied - strip token cleanly from output
+        $EventTitle = $EventTitle -replace '\{MANUFACTURER\} ?', ''
+        $ToastTitle = $ToastTitle -replace '\{MANUFACTURER\} ?', ''
+        $EventText  = $EventText  -replace '\{MANUFACTURER\} ?', ''
+    }
 
     #Set COM App ID for toast notifications
     # Build AUMID dynamically from AppIDName so each display name gets its own registration.
@@ -1806,7 +1812,7 @@ If ($XMLValid -eq $True) {
         $Task_Expiry = (Get-Date).AddSeconds(120).ToString('s')
 
         #Build arguments string with optional parameters
-        $TaskArguments = "-NoProfile -WindowStyle Hidden -File ""$New_ToastPath"" -ToastGUID ""$ToastGUID"" -XMLSource ""$XMLSource"" -ToastScenario ""$ToastScenario"" -RebootCountdownMinutes $RebootCountdownMinutes -RegistryHive ""$RegistryHive"" -RegistryPath ""$RegistryPath"" -AppIDName ""$AppIDName"""
+        $TaskArguments = "-NoProfile -WindowStyle Hidden -File ""$New_ToastPath"" -ToastGUID ""$ToastGUID"" -XMLSource ""$XMLSource"" -ToastScenario ""$ToastScenario"" -RebootCountdownMinutes $RebootCountdownMinutes -RegistryHive ""$RegistryHive"" -RegistryPath ""$RegistryPath"" -AppIDName ""$AppIDName"" -Manufacturer ""$Manufacturer"""
         If ($Snooze) {
             $TaskArguments += " -Snooze"
         }
@@ -2121,7 +2127,12 @@ If ($XMLValid -eq $True) {
             }
 
             # Replace {MANUFACTURER} token in stage-specific event text
-            $EventText = $EventText -replace '\{MANUFACTURER\}', $DetectedManufacturer
+            if (-not [string]::IsNullOrWhiteSpace($Manufacturer)) {
+                $EventText = $EventText -replace '\{MANUFACTURER\}', $Manufacturer
+            }
+            else {
+                $EventText = $EventText -replace '\{MANUFACTURER\} ?', ''
+            }
 
             # Build stage attribution text
             $StageAttribution = ""

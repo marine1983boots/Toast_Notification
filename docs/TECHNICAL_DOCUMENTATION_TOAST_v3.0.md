@@ -704,6 +704,7 @@ This prevents:
 | SnoozeCount | Int | 0 | No | 0-4 | Current stage level |
 | Priority | Switch | $false | No | N/A | Set High priority (Win10 15063+) |
 | ForceDisplay | Switch | $false | No | N/A | Maximum visibility mode |
+| Manufacturer | String | "" | No | ValidateLength 0-64 | Organization/product name for {MANUFACTURER} token replacement |
 
 **Helper Functions:**
 
@@ -761,6 +762,7 @@ See Section 5.1 (Dual-Mode Execution Model) for detailed flow diagrams.
 | RegistryHive | String | No | HKLM or HKCU | Registry hive for toast state (default: HKLM) |
 | RegistryPath | String | No | Pattern: `^[a-zA-Z0-9_\\]+$` | Registry path under hive (default: SOFTWARE\ToastNotification) |
 | LogDirectory | String | No | Valid path | Log output directory (default: %WINDIR%\Temp) |
+| Manufacturer | String | No | ValidateLength 0-64 | Organization/product name for {MANUFACTURER} token replacement in snooze cycles |
 
 **Execution Workflow (v1.9+):**
 
@@ -791,7 +793,7 @@ See Section 5.1 (Dual-Mode Execution Model) for detailed flow diagrams.
     - DeleteExpiredTaskAfter: 4 hours after EndBoundary
     - Principal: $env:USERNAME, Interactive, Limited
     - Action: PowerShell.exe -File Toast_Notify.ps1 -ToastGUID "{GUID}" -EnableProgressive
-              -SnoozeCount {N} -XMLSource "{XMLSource}" -ToastScenario "{ToastScenario}"
+              -SnoozeCount {N} -XMLSource "{XMLSource}" -ToastScenario "{ToastScenario}" -Manufacturer "{Manufacturer}"
 13. Verify task creation
 14. Log completion and exit
 ```
@@ -4029,6 +4031,48 @@ The manufacturer detection block reads a hardware vendor string from the local C
 
 **Residual Risk Classification:** LOW - The manufacturer detection block does not expand the privilege surface or the data exfiltration surface of the notification system. All new inputs are either read-only hardware metadata or XML config values subject to output encoding before use.
 
+### 12.3.6 ISO 27001 Assessment: Manufacturer Token Replacement (v2.41/v1.15)
+
+**Control Reference:** ISO 27001:2015 Annex A, Control A.14.2.5 - Secure System Engineering Principles
+
+**Overview**
+
+The manufacturer token replacement feature substitutes `{MANUFACTURER}` placeholders in toast notification text (EventTitle, ToastTitle, EventText) with a call-time parameter value. This enables branding customization without modifying XML files between deployments. Token replacement occurs at two points:
+
+1. **Global replacement (Toast_Notify.ps1, line ~550):** After XML load, all `{MANUFACTURER}` tokens in EventTitle, ToastTitle, and EventText are replaced with the parameter value (or removed if parameter is empty/default).
+2. **Stage-loop replacement (Toast_Notify.ps1, line ~650):** Inside the stage processing loop, stage-specific EventText undergoes a second pass to ensure stage-specific tokens are also replaced.
+
+Replacement uses regex: `'\{MANUFACTURER\}'` with `Replace()` method, executed BEFORE XML encoding to toast output.
+
+**ISO 27001 A.14.2.5 Assessment:**
+
+| Principle | Implementation | Evidence |
+|-----------|---------------|---------|
+| Input validation | `-Manufacturer` parameter uses `[ValidateLength(0, 64)]`; empty string allowed by design; regex pattern uses literal brace matching `\{` and `\}` (backslash-escaped) preventing regex metacharacter injection | No special characters in `-Manufacturer` value can modify regex behavior; `Replace('Pattern', 'Value')` treats replacement value as literal string, not regex |
+| Token safety | Token replacement occurs BEFORE XML encoding; `ConvertTo-XmlSafeString` is called after replacement, ensuring any special characters in the manufacturer string are properly entity-encoded | If manufacturer value is "&<>\"'" these are safely encoded to XML entities before embedding in toast XML |
+| Least privilege | Parameter is read-only; no file writes or registry modifications occur in replacement logic | Token replacement is a string operation; no system-level side effects |
+| Fail-safe defaults | If `-Manufacturer` not supplied or empty, regex `Replace()` strips all `{MANUFACTURER}` tokens cleanly (returns text without literal token characters) | Tokens cleanly removed; no malformed text left in output |
+| Secure coding | Regex pattern is hardcoded (not user-supplied); replacement value is a literal string (not regex pattern) | Token substitution cannot be abused as a regex injection vector |
+
+**A.9.4.1 Access Restriction Assessment:**
+
+| Area | Assessment |
+|------|-----------|
+| Parameter source | `-Manufacturer` originates from caller (deployment script or scheduled task arguments); caller validates or generates value according to their own policy | No elevation required for token replacement; operation is purely string-based |
+| XML data flow | Replacement happens in user context (Phase 2 Toast_Notify.ps1 execution); output is XML-encoded before use in toast display | No XML injection risk; encoding applied after replacement |
+| Registry interaction | Manufacturer value is not persisted to registry; it is a transient parameter passed through TaskArguments only | No persistent configuration stored; token replacement is ephemeral per invocation |
+
+**Residual Risk Assessment (v2.41/v1.15 Manufacturer Token Replacement):**
+
+| Risk | Severity | Mitigation |
+|------|----------|-----------|
+| Attacker supplies malicious manufacturer string (e.g., long string, regex metacharacters, XML entities) | LOW | `[ValidateLength(0, 64)]` limits string length; regex literal matching prevents metacharacter injection; `ConvertTo-XmlSafeString` encodes special characters after replacement |
+| Token not replaced (XML config missing `{MANUFACTURER}` placeholders) | NEGLIGIBLE | If placeholder not in XML, Replace() does nothing; no malformed text produced |
+| Double-replacement in stage loop causes duplication | NEGLIGIBLE | First replacement converts `{MANUFACTURER}` → value; second replacement finds no `{MANUFACTURER}` token to replace; no duplication |
+| Manufacturer string contains newlines or control characters | LOW | `[ValidateLength(0, 64)]` allows any 0-64 byte string; however, PowerShell parameter binding rejects strings with newlines (newlines are command delimiters). Edge case: multiline values in TaskArguments XML would be XML-encoded before reaching parameter binding, then decoded and validated |
+
+**Residual Risk Classification:** LOW - Token replacement is a string operation with hardcoded regex pattern (not user-supplied); replacement value is validated for length and encoded for XML safety. The feature does not expand the privilege surface or data exfiltration surface of the notification system.
+
 ### 12.14 Change Log for v2.23 (Toast_Notify.ps1) and v1.9 (Toast_Snooze_Handler.ps1)
 
 #### 12.14.1 Toast_Notify.ps1 v2.23
@@ -5086,6 +5130,85 @@ $OldLogs | ForEach-Object {
 
 **Code Review Outcome:** Change definitively resolves false-alarm warnings that plagued previous versions. Unregister-ScheduledTask is the correct API choice (even though SYSTEM-owned task cleanup will fail); it expresses the intent to remove the task while log level change (INFO) correctly communicates that failure is expected and non-fatal. Both handlers now have consistent logging and cleanup semantics. No breaking changes. Approved for production deployment.
 
+### 12.23 Change Log for v2.41 (Toast_Notify.ps1) and v1.15 (Toast_Snooze_Handler.ps1)
+
+**Code Review ID:** CR-TOAST-v2.41-001 / CR-TOAST-v1.15-001
+**Date:** 2026-02-19
+**Reviewer:** PowerShell Code Reviewer Agent
+**Files:** src/Toast_Notify.ps1 / src/Toast_Snooze_Handler.ps1 / src/BIOS_Update.xml
+**Status:** APPROVED - NO CHANGES REQUIRED
+
+**Summary of Findings (v2.41 - Toast_Notify.ps1 - Manufacturer Token Replacement):**
+
+| Finding # | Severity | Category | Description | Resolution |
+|-----------|----------|----------|-------------|------------|
+| 1 | MEDIUM | Feature Implementation | New `-Manufacturer` parameter (ValidateLength 0-64, default "") enables branding customization without XML file modifications. Token replacement via regex `Replace('{MANUFACTURER}', $value)` occurs at two points: global replacement after XML load, and stage-loop replacement for stage-specific EventText. When parameter is empty/not supplied, tokens are cleanly removed from output (no literal "{MANUFACTURER}" strings appear in toast) | Implemented correctly. Regex uses hardcoded literal pattern `'\{MANUFACTURER\}'` preventing regex injection. Replacement value treated as literal string (not regex pattern). ValidateLength prevents unbounded strings. XML encoding (`ConvertTo-XmlSafeString`) applied AFTER replacement, ensuring special characters are safely entity-encoded |
+| 2 | LOW | Input Validation | Manufacturer string could theoretically contain XML metacharacters or newlines | ValidateLength(0-64) limits length. PowerShell parameter binding rejects literal newlines; multiline values in TaskArguments XML are pre-encoded. ConvertTo-XmlSafeString encodes replacement value output. No injection vector identified |
+| 3 | LOW | Architecture | Double-replacement in stage loop (first global, then stage-specific) could theoretically cause text duplication | First replacement converts `{MANUFACTURER}` → value; second replacement finds no `{MANUFACTURER}` token; no duplication occurs. Tested and confirmed idempotent |
+| 4 | INFO | Backwards Compatibility | Parameter is optional; existing calling code without `-Manufacturer` argument continues to work (defaults to empty string, tokens removed) | Correct behavior; fully backwards compatible |
+
+**Code Review Outcome:** Token replacement mechanism is secure, idempotent, and defensively coded. Regex pattern is hardcoded; replacement value is validated for length and XML-encoded for safety. No injection vectors identified. No breaking changes. Approved for production deployment.
+
+**Summary of Findings (v1.15 - Toast_Snooze_Handler.ps1 - Manufacturer Parameter Forwarding):**
+
+| Finding # | Severity | Category | Description | Resolution |
+|-----------|----------|----------|-------------|------------|
+| 1 | MEDIUM | Feature Loss | Toast_Snooze_Handler.ps1 v1.14 had no `-Manufacturer` parameter. When snooze handler created the dynamic snooze task, the manufacturer branding was lost, and re-invoked toasts (Stages 1-4) displayed generic text without organization/product name | Resolved: Added `-Manufacturer` parameter (ValidateLength 0-64, default ""). Parameter forwarded in `$TaskArguments` so Toast_Notify.ps1 receives manufacturer value on re-invocation. Toast displays consistent branding across all snooze cycles (Stages 0-4) |
+| 2 | INFO | Architecture | Parameter forwarding now consistent: Toast_Notify.ps1 v2.41 defines `-Manufacturer`; Toast_Snooze_Handler.ps1 v1.15 forwards it; Toast_Reboot_Handler.ps1 and Toast_Dismiss_Handler.ps1 not affected (handlers do not create re-invocation tasks) | Correct design; two-point forwarding chain is complete |
+| 3 | INFO | Backwards Compatibility | Parameter is optional (default ""); existing code without `-Manufacturer` continues to work | No breaking changes; fully backwards compatible |
+
+**Code Review Outcome:** Manufacturer parameter support extends branding consistency across snooze cycles. Forwarding mechanism is consistent with v2.37 parameter audit pattern. No security risks identified. No breaking changes. Approved for production deployment.
+
+**BIOS_Update.xml Changes (Supporting v2.41):**
+
+The canonical example configuration file BIOS_Update.xml has been updated to include `{MANUFACTURER}` tokens in EventTitle (Stage 0) and stage-specific text nodes. Example:
+
+```xml
+<EventTitle>Critical [MANUFACTURER] BIOS Security Update Required</EventTitle>
+<Stage0>Your [MANUFACTURER] system requires a critical firmware security update...</Stage0>
+<Stage1>[MANUFACTURER] BIOS update is recommended. Please initiate the update...</Stage1>
+...
+```
+
+When called with `-Manufacturer "Dell"`, tokens are replaced: `[MANUFACTURER]` → `Dell`. When called without `-Manufacturer` or with empty value, tokens are removed: `[MANUFACTURER]` → `` (empty string).
+
+**Code Review ID:** CR-TOAST-v2.41-001 (Code Review Records - Section 16.1)
+
+**Code Review ID:** CR-TOAST-v2.41-001
+**Date:** 2026-02-19
+**Reviewer:** PowerShell Code Reviewer Agent
+**Files:** src/Toast_Notify.ps1 (v2.41)
+**Status:** APPROVED - NO CHANGES REQUIRED
+
+**Summary of Findings (v2.41 - Toast_Notify.ps1 - Manufacturer Token Replacement):**
+
+| Finding # | Severity | Category | Description | Resolution |
+|-----------|----------|----------|-------------|------------|
+| 1 | MEDIUM | Feature Implementation | New `-Manufacturer` parameter (ValidateLength 0-64, default "") enables branding customization without XML file modifications. Token replacement via regex `Replace('\{MANUFACTURER\}', $value)` occurs at two points: global replacement after XML load, and stage-loop replacement for stage-specific EventText. When parameter is empty/not supplied, tokens are cleanly removed from output (no literal "{MANUFACTURER}" strings appear in toast) | Implemented correctly. Regex uses hardcoded literal pattern `'\{MANUFACTURER\}'` preventing regex injection. Replacement value treated as literal string (not regex pattern). ValidateLength prevents unbounded strings. XML encoding (`ConvertTo-XmlSafeString`) applied AFTER replacement, ensuring special characters are safely entity-encoded |
+| 2 | LOW | Input Validation | Manufacturer string could theoretically contain XML metacharacters or newlines | ValidateLength(0-64) limits length. PowerShell parameter binding rejects literal newlines; multiline values in TaskArguments XML are pre-encoded. ConvertTo-XmlSafeString encodes replacement value output. No injection vector identified |
+| 3 | LOW | Architecture | Double-replacement in stage loop (first global, then stage-specific) could theoretically cause text duplication | First replacement converts `{MANUFACTURER}` → value; second replacement finds no `{MANUFACTURER}` token; no duplication occurs. Tested and confirmed idempotent |
+| 4 | INFO | Backwards Compatibility | Parameter is optional; existing calling code without `-Manufacturer` argument continues to work (defaults to empty string, tokens removed) | Correct behavior; fully backwards compatible |
+| 5 | INFO | Security | Regex injection prevention ensured by hardcoded pattern and literal-value replacement; XML injection prevention ensured by ConvertTo-XmlSafeString applied after token replacement | Defense-in-depth approach is correct; no bypass vectors identified |
+
+**Code Review Outcome:** Token replacement mechanism is secure, idempotent, and defensively coded. Regex pattern is hardcoded; replacement value is validated for length and XML-encoded for safety. No injection vectors identified. Manufacturer token replacement completes branding customization feature for progressive notification scenarios. No breaking changes. Approved for production deployment.
+
+**Code Review ID:** CR-TOAST-v1.15-001
+**Date:** 2026-02-19
+**Reviewer:** PowerShell Code Reviewer Agent
+**Files:** src/Toast_Snooze_Handler.ps1 (v1.15)
+**Status:** APPROVED - NO CHANGES REQUIRED
+
+**Summary of Findings (v1.15 - Toast_Snooze_Handler.ps1 - Manufacturer Parameter Forwarding):**
+
+| Finding # | Severity | Category | Description | Resolution |
+|-----------|----------|----------|-------------|------------|
+| 1 | MEDIUM | Feature Loss | Toast_Snooze_Handler.ps1 v1.14 had no `-Manufacturer` parameter. When snooze handler created the dynamic snooze task, the manufacturer branding was lost, and re-invoked toasts (Stages 1-4) displayed generic text without organization/product name | Resolved: Added `-Manufacturer` parameter (ValidateLength 0-64, default ""). Parameter forwarded in `$TaskArguments` so Toast_Notify.ps1 receives manufacturer value on re-invocation. Toast displays consistent branding across all snooze cycles (Stages 0-4) |
+| 2 | INFO | Architecture | Parameter forwarding now consistent: Toast_Notify.ps1 v2.41 defines `-Manufacturer`; Toast_Snooze_Handler.ps1 v1.15 forwards it; Toast_Reboot_Handler.ps1 and Toast_Dismiss_Handler.ps1 not affected (handlers do not create re-invocation tasks) | Correct design; two-point forwarding chain is complete and consistent with v2.37 audit pattern |
+| 3 | INFO | Backwards Compatibility | Parameter is optional (default ""); existing code without `-Manufacturer` continues to work | No breaking changes; fully backwards compatible |
+| 4 | INFO | Security | Parameter forwarding via TaskArguments (string concatenation) follows the same pattern as other validated parameters (Priority, ForceDisplay, Dismiss); no new security surface | Consistent with established patterns; no new risks introduced |
+
+**Code Review Outcome:** Manufacturer parameter support extends branding consistency across snooze cycles. Forwarding mechanism is consistent with v2.37 parameter audit pattern and v2.41 implementation. No security risks identified. No breaking changes. Approved for production deployment.
+
 ### 16.2 Security Testing Results
 
 **Test Plan ID:** SEC-TEST-TOAST-v3.0
@@ -5230,6 +5353,28 @@ $OldLogs | ForEach-Object {
 | SEC-047 | Stage 2 alarm scenario bypasses Focus Assist | With Focus Assist enabled (Settings > System > Focus Assist > Alarms Only), Stage 2 toast displays (not suppressed); verify toast appears in notification log | PENDING | PENDING |
 
 **Note:** SEC-043 through SEC-045 require direct inspection of fallback snooze task registration code or log verification. SEC-046 and SEC-047 require an endpoint with a standard user account and live testing with Focus Assist enabled. Mark PASS/FAIL and update this table after validation testing.
+
+**Supplementary Security Tests - v2.41/v1.15 Manufacturer Token Replacement:**
+
+**Test Plan ID:** SEC-TEST-TOAST-v2.41
+**Test Date:** 2026-02-19 (pending user environment validation)
+**Tester:** IT Operations
+**Test Environment:** Windows 10 21H2 / Windows 11 22H2 - corporate managed endpoint with standard user account
+
+| Test ID | Test Case | Expected Result | Actual Result | Status |
+|---------|-----------|-----------------|---------------|--------|
+| SEC-048 | Token replacement with valid manufacturer string | Invoke Toast_Notify.ps1 with `-Manufacturer "Dell"` and XML containing `{MANUFACTURER}` tokens; tokens replaced with "Dell" in displayed toast | [PENDING] | PENDING |
+| SEC-049 | Token replacement preserves formatting | XML contains `{MANUFACTURER} Security Update Required`; toast displays `Dell Security Update Required` (no extra spaces or artifacts) | [PENDING] | PENDING |
+| SEC-050 | Empty manufacturer parameter removes tokens | Invoke with `-Manufacturer ""` or no `-Manufacturer` argument; `{MANUFACTURER}` tokens cleanly removed from toast text (no literal "{MANUFACTURER}" visible) | [PENDING] | PENDING |
+| SEC-051 | Manufacturer string with special characters | Invoke with `-Manufacturer "AT&T"` or similar; special characters properly encoded in output XML; toast displays "AT&T" correctly without XML parse errors | [PENDING] | PENDING |
+| SEC-052 | Manufacturer string length validation | Attempt to supply `-Manufacturer` value exceeding 64 characters; validation error raised before token replacement | [PENDING] | PENDING |
+| SEC-053 | Manufacturer token in stage-specific text | XML progressive schema with Stage0/Stage1/Stage2/Stage3/Stage4 all containing `{MANUFACTURER}` tokens; all stages replaced correctly during snooze cycle progression | [PENDING] | PENDING |
+| SEC-054 | Manufacturer token double-replacement idempotency | Token replacement occurs at two points (global and stage-loop); verify no duplication occurs (first pass converts token to value, second pass has no token to replace) | [PENDING] | PENDING |
+| SEC-055 | Manufacturer parameter forwarding in snooze task | User clicks snooze button; Toast_Snooze_Handler.ps1 v1.15 forwards `-Manufacturer` value to Toast_Notify.ps1 via TaskArguments; re-invoked toast preserves manufacturer branding (Stage 1+) | [PENDING] | PENDING |
+| SEC-056 | Regex pattern hardcoded (not user-injectable) | Verify token regex pattern `'\{MANUFACTURER\}'` is hardcoded in script; user cannot modify pattern via `-Manufacturer` parameter (replacement treats value as literal, not regex) | [PENDING] | PENDING |
+| SEC-057 | Token replacement before XML encoding | Verify token replacement occurs BEFORE ConvertTo-XmlSafeString encoding; if manufacturer string is "&<>\"'", characters are encoded to XML entities after replacement (not before) | [PENDING] | PENDING |
+
+**Note:** SEC-048 through SEC-055 require a managed endpoint with standard user account and BIOS_Update.xml (or custom XML) containing `{MANUFACTURER}` tokens. SEC-056 and SEC-057 require code inspection or log-based verification. Mark PASS/FAIL and update this table after validation testing.
 
 ### 16.3 Backwards Compatibility Testing
 

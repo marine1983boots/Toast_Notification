@@ -5,6 +5,11 @@ Created by:   Ben Whitmore (with AI assistance)
 Filename:     Toast_Snooze_Handler.ps1
 ===========================================================================
 
+Version 1.15 - 19/02/2026
+-ADD: Added $Manufacturer string parameter (ValidateLength 0-64, default "").
+ Forwarded in $TaskArguments to the next Toast_Notify.ps1 invocation so custom
+ manufacturer branding persists across snooze cycles.
+
 Version 1.14 - 19/02/2026
 -FIX: Added $Priority, $ForceDisplay, $Dismiss switch parameters to param block.
  These are now forwarded conditionally in $TaskArguments to the next Toast_Notify.ps1
@@ -188,7 +193,10 @@ Param(
     [Parameter(Mandatory = $false)]
     [Switch]$ForceDisplay,
     [Parameter(Mandatory = $false)]
-    [Switch]$Dismiss
+    [Switch]$Dismiss,
+    [Parameter(Mandatory = $false)]
+    [ValidateLength(0, 64)]
+    [String]$Manufacturer = ""
 )
 
 #region Helper Functions
@@ -512,6 +520,7 @@ try {
             " -RegistryHive `"$RegistryHive`"" +
             " -RegistryPath `"$RegistryPath`"" +
             " -AppIDName `"$AppIDName`"" +
+            " -Manufacturer `"$Manufacturer`"" +
             " -Snooze"
         if ($Priority) { $TaskArguments += " -Priority" }
         if ($ForceDisplay) { $TaskArguments += " -ForceDisplay" }
