@@ -8,6 +8,13 @@
     toast GUID, then disables the main notification task to prevent re-display.
     No reboot is initiated - dismiss is a clean exit from the notification flow.
 
+    Version 1.3 - 19/02/2026
+    -FIX: Disable-ScheduledTask on main task now replaced with Unregister-ScheduledTask.
+     Main task (Toast_Notification_{GUID}) is registered by SYSTEM - standard users receive
+     Access Denied when attempting to disable or remove it. This is non-fatal: the task has a
+     2-minute EndBoundary with no StartWhenAvailable, so it will not re-fire after reboot.
+     Catch block now logs [INFO] instead of [WARNING] to avoid false-alarm noise in logs.
+
     Version 1.2 - 18/02/2026
     -FIX: Replace Remove-Item with Set-ItemProperty Completed=1 for HKLM registry cleanup
     -User context cannot delete HKLM keys (KEY_WRITE required on parent, intentionally blocked)
@@ -150,22 +157,23 @@ try {
                     Write-Warning "[!] Fallback task removal non-fatal: $($_.Exception.Message)"
                 }
 
-                # 3. Disable the main notification task to prevent re-display
-                # Without this, Toast_Notification_{GUID} may fire again on next trigger
+                # 3. Attempt to remove the main notification task
+                # Note: main task is registered by SYSTEM - standard users may receive Access Denied.
+                # This is non-fatal: the task has a 2-minute EndBoundary and no StartWhenAvailable,
+                # so it will not re-fire after reboot regardless.
                 $MainTaskName = "Toast_Notification_$ToastGUID"
                 try {
                     $MainTask = Get-ScheduledTask -TaskName $MainTaskName -ErrorAction SilentlyContinue
                     if ($MainTask) {
-                        Disable-ScheduledTask -TaskName $MainTaskName -ErrorAction Stop | Out-Null
-                        Write-Output "[OK] Main notification task disabled: $MainTaskName"
+                        Unregister-ScheduledTask -TaskName $MainTaskName -Confirm:$false -ErrorAction Stop | Out-Null
+                        Write-Output "[OK] Main notification task removed: $MainTaskName"
                     }
                     else {
-                        Write-Output "[INFO] Main notification task not found: $MainTaskName"
+                        Write-Output "[INFO] Main notification task not found (already expired or removed): $MainTaskName"
                     }
                 }
                 catch {
-                    Write-Warning "Could not disable main task ${MainTaskName}: $($_.Exception.Message)"
-                    Write-Warning "Continuing - task cleanup non-fatal"
+                    Write-Output "[INFO] Main task cleanup skipped - registered by SYSTEM, standard users cannot remove it. Task expires naturally (2-min EndBoundary, no StartWhenAvailable): $MainTaskName"
                 }
 
                 Write-Output "[OK] Dismiss cleanup completed successfully"
