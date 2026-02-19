@@ -5,6 +5,11 @@ Created by:   Ben Whitmore
 Filename:     Toast_Notify.ps1
 ===========================================================================
 
+Version 2.33 - 19/02/2026
+-FIX: Initialize-ToastRegistry fails to create base registry path when intermediate keys are missing
+ (New-Item -Path $BasePath -Force now used instead of Split-Path dance; registry provider -Force
+  flag creates all intermediate keys recursively, fixing "path not found" on custom -RegistryPath)
+
 Version 2.32 - 18/02/2026
 -FIX: HKLM registry cleanup failure after Reboot/Dismiss button click
 -Handlers (v1.4/v1.2) now write Completed=1 value instead of deleting the key
@@ -521,9 +526,7 @@ function Initialize-ToastRegistry {
     try {
         # Create base path if not exists
         if (!(Test-Path $BasePath)) {
-            $ParentPath = Split-Path $BasePath -Parent
-            $LeafName = Split-Path $RegistryPath -Leaf
-            New-Item -Path $ParentPath -Name $LeafName -Force | Out-Null
+            New-Item -Path $BasePath -Force | Out-Null
         }
 
         # Create toast-specific path
