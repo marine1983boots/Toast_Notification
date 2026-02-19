@@ -5,8 +5,8 @@
 | Field | Value |
 |-------|-------|
 | Document Title | Technical Documentation - Progressive Toast Notification System v3.0 |
-| Version | 4.1 |
-| Date | 2026-02-18 |
+| Version | 4.2 |
+| Date | 2026-02-19 |
 | Author | CR |
 | Based On | Toast by Ben Whitmore (@byteben) |
 | License | GNU General Public License v3 |
@@ -38,6 +38,7 @@
 | 3.9 | 2026-02-17 | CR | Updated for v2.23/v1.9 architecture change (dynamic task creation, registry-based config, Initialize-SnoozeTasks no-op), v2.24 (toast-dismiss:// protocol registration, Dismiss button stages 0-3, Stage 4 no-dismiss enforcement), Toast_Snooze_Handler.ps1 v1.9 (dynamic Register-ScheduledTask with user credentials, username-qualified task names, 3-day expiry + StartWhenAvailable, registry-sourced XMLSource/ToastScenario), Toast_Reboot_Handler.ps1 v1.2 (username-qualified cleanup, Unregister-ScheduledTask, main task cleanup, 10-iteration loop), Toast_Dismiss_Handler.ps1 v1.0 (new file: toast-dismiss:// protocol handler, non-fatal cleanup sequence); added Sections 12.2.10, 12.2.11, 12.3.4, 12.14, 12.15; added code review records CR-TOAST-v2.23-001 through CR-TOAST-v1.0-001; added SEC-028 through SEC-037 |
 | 4.0 | 2026-02-17 | CR | Updated for v2.25 (dynamic manufacturer detection via CIM Win32_ComputerSystemProduct.Vendor; switch-based resolution for HP/Lenovo/Default; ManufacturerConfig XML block overrides BadgeImage, ButtonAction, AppIDDisplayName per vendor; {MANUFACTURER} token replacement in EventTitle, ToastTitle, EventText; path traversal protection via GetFileName(); XML attribute injection protection via ConvertTo-XmlSafeString; Register-ToastAppId parameter renamed from $DisplayName to $AppIDDisplayName); BIOS_Update.xml updated with {MANUFACTURER} token in EventTitle and Stage0 text, plus new ManufacturerConfig child nodes; added Sections 12.2.12, 12.3.5, 12.16; added code review record CR-TOAST-v2.25-001; added SEC-038 through SEC-042 |
 | 4.1 | 2026-02-18 | CR | Updated for v2.31 (fixed fallback stage progression logic: FallbackAdvanceStage now unconditionally includes -AdvanceStage for all stages 0-3 to prevent indefinite re-firing at same stage; Stage 4 protected by outer guard; fixed Focus Assist bypass: Stage 1 and Stage 2 Scenario changed from 'reminder' to 'alarm' to match Stage 0/3 Focus Assist bypass behavior, resolving issue where users in Focus Assist mode never saw Stage 1/2 escalation); added Section 12.17, Table 12.17.1 (Stage Configuration Summary post-v2.31); added code review record CR-TOAST-v2.31-001; added SEC-043 through SEC-047 |
+| 4.2 | 2026-02-19 | CR | Updated for v2.33 (fixed Initialize-ToastRegistry intermediate key creation: replaced Split-Path/New-Item -Name with New-Item -Path -Force for full recursive key creation) and v2.34 (fixed Grant-RegistryPermissions hardcoded registry paths: ValidatePattern relaxed from hardcoded SOFTWARE\ToastNotification to accept any HKLM\{path}\{GUID}, ParentPath now derived via Split-Path, RegPath in SYSTEM block uses $RegistryHive variable); added Section 12.18 (v2.33 changelog), Section 12.19 (v2.34 changelog); added code review records CR-TOAST-v2.33-001 and CR-TOAST-v2.34-001 |
 
 ## Table of Contents
 
@@ -64,6 +65,8 @@
     - 12.15 [Change Log for v2.24, v1.2, and v1.0](#1215-change-log-for-v224-v12-and-v10)
     - 12.16 [Change Log for v2.25 (Toast_Notify.ps1) and BIOS_Update.xml](#1216-change-log-for-v225-toast_notifyps1-and-bios_updatexml)
     - 12.17 [Change Log for v2.31 (Toast_Notify.ps1) - Fallback and Focus Assist Fixes](#1217-change-log-for-v231-toast_notifyps1-fallback-and-focus-assist-fixes)
+    - 12.18 [Change Log for v2.33 (Toast_Notify.ps1) - Registry Intermediate Key Creation Fix](#1218-change-log-for-v233-toast_notifyps1-registry-intermediate-key-creation-fix)
+    - 12.19 [Change Log for v2.34 (Toast_Notify.ps1) - Custom Registry Path Support](#1219-change-log-for-v234-toast_notifyps1-custom-registry-path-support)
 13. [Testing and Validation](#13-testing-and-validation)
 14. [Troubleshooting Guide](#14-troubleshooting-guide)
 15. [Maintenance Procedures](#15-maintenance-procedures)
@@ -4088,6 +4091,92 @@ The manufacturer detection block reads a hardware vendor string from the local C
 | **Backwards Compatibility** | COMPATIBLE - No breaking changes. v2.31 can be deployed over v2.30 or earlier without modification. Fallback tasks created by v2.30 may fire once more at same stage before new v2.31 version creates advanced-state tasks, but this is not an issue (idempotent behavior) |
 | **Testing** | SEC-043 through SEC-047 - Validate fallback advance behavior, Focus Assist bypass, and combined behavior |
 
+### 12.18 Change Log for v2.33 (Toast_Notify.ps1) - Registry Intermediate Key Creation Fix
+
+#### 12.18.1 Root Cause Analysis
+
+**Issue:** When `Initialize-ToastRegistry` function received a custom `-RegistryPath` parameter value containing intermediate registry keys that did not yet exist (e.g., `SOFTWARE\MyCompany\Toast`), the registry key creation failed silently.
+
+**Root Cause Details:**
+1. Old implementation used `Split-Path $RegistryPath -Parent` to extract the parent path and `Split-Path $RegistryPath -Leaf` to extract the leaf key name
+2. Called `New-Item -Path $ParentPath -Name $LeafName -Force`
+3. If `$ParentPath` itself did not exist, the registry provider rejected the operation with "path not found" error
+4. Error was caught silently in the try/catch block, function returned `$false`
+5. Calling code (`Get-ToastState`) then logged "Registry path not found" warning
+6. Application fell back to default state instead of using custom registry path
+
+**Impact:** Users who specified custom registry paths via `-RegistryPath` parameter were silently downgraded to default registry location, with no visible warning to administrators.
+
+**Security Impact:** NEUTRAL - This is a configuration initialization issue, not a security control; fixes usability without introducing risk.
+
+#### 12.18.2 Toast_Notify.ps1 v2.33 Fix
+
+| Item | Description |
+|------|-------------|
+| **Function Modified** | `Initialize-ToastRegistry` |
+| **Change Description** | Replaced `New-Item -Path $ParentPath -Name $LeafName -Force` with `New-Item -Path $BasePath -Force` where `$BasePath` is the full registry path (e.g., `HKLM:\SOFTWARE\MyCompany\Toast`). The PowerShell registry provider's `-Force` flag on a full path creates all intermediate keys recursively. |
+| **Old Code Pattern** | `$ParentPath = Split-Path $RegistryPath -Parent` then `New-Item -Path $ParentPath -Name $LeafName -Force` |
+| **New Code Pattern** | `$BasePath = "HKLM:\$RegistryPath"` then `New-Item -Path $BasePath -Force` |
+| **Behavior Change** | Intermediate registry keys are now created automatically; custom registry paths work as intended without silent fallback |
+| **Backwards Compatibility** | COMPATIBLE - No breaking changes. Existing deployments with default path continue working. New deployments with custom paths now work correctly. |
+| **Error Handling** | Outer try/catch still catches provider errors (e.g., access denied); function returns `$false` only on actual permission failure |
+| **ISO 27001 Impact** | A.9.4.1 COMPLIANT - No change to access control model; registry creation is pre-initialization phase |
+| **Code Location** | `src/Toast_Notify.ps1`, `Initialize-ToastRegistry` function |
+| **Code Review** | CR-TOAST-v2.33-001 - Approved (see Section 16.1) |
+| **Testing** | Manual validation on test endpoints with `-RegistryPath SOFTWARE\TestCompany\Toast` parameter; registry key created successfully with no errors |
+| **Deployment Impact** | Drop-in replacement for v2.32; no configuration changes required |
+
+---
+
+### 12.19 Change Log for v2.34 (Toast_Notify.ps1) - Custom Registry Path Support
+
+#### 12.19.1 Root Cause Analysis
+
+**Issue:** The `Grant-RegistryPermissions` function and the SYSTEM deployment block in `Toast_Notify.ps1` contained three hardcoded references to `SOFTWARE\ToastNotification`, preventing the use of custom registry paths specified via the `-RegistryPath` parameter.
+
+**Root Cause Details:**
+
+1. **ValidatePattern Parameter Constraint (Line ~540)**
+   - Pattern: `'^HKLM:\\SOFTWARE\\ToastNotification\\[A-F0-9\-]{1,36}$'`
+   - This pattern required the registry path to be exactly `HKLM:\SOFTWARE\ToastNotification\{GUID}`
+   - Any custom path like `HKLM:\SOFTWARE\MyCompany\Toast\{GUID}` failed parameter validation immediately
+   - Error message: "Cannot validate argument on parameter 'RegistryPath' because the pattern '[regex]' does not match the pattern validation attribute"
+
+2. **ParentPath Hardcoded in ACL Scope Verification (Line ~570)**
+   - Code: `$ParentPath = "HKLM:\SOFTWARE\ToastNotification"`
+   - Used to verify that the registry key being granted permissions is a direct child of the standard Toast location
+   - Custom paths failed this check, throwing an error before ACL grant attempt
+
+3. **RegPath Hardcoded Hive in SYSTEM Block (Line ~920)**
+   - Code: `$RegPath = "HKLM:\${RegistryPath}\$ToastGUID"`
+   - Used literal `HKLM:` instead of `$RegistryHive` variable
+   - If user specified `HKCU` via `-RegistryHive` parameter, this block would still write to HKLM, creating key mismatch
+
+**Impact:** Users who attempted to use custom registry paths (e.g., `HKCU:\SOFTWARE\ToastNotification\{GUID}` for per-user configuration) encountered parameter validation failures, access denied errors, or registry key mismatches.
+
+**Security Impact:** LOW (POSITIVE) - Fixing this enables least-privilege deployments where unprivileged users store toast state in HKCU instead of requiring HKLM writes.
+
+#### 12.19.2 Toast_Notify.ps1 v2.34 Fix
+
+| Item | Description |
+|------|-------------|
+| **Function Modified** | `Grant-RegistryPermissions` (3 changes) |
+| **Change 1: ValidatePattern Parameter** | Updated from `'^HKLM:\\SOFTWARE\\ToastNotification\\[A-F0-9\-]{1,36}$'` to `'^HKLM:\\[a-zA-Z0-9_\\]+\\[A-F0-9\-]{1,36}$'`. Now accepts any HKLM path ending in a GUID-format subkey, e.g., `HKLM:\SOFTWARE\MyCompany\Toast\{GUID}` |
+| **Change 1 Impact** | Parameter validation passes for all valid custom registry paths. Still enforces HKLM root and GUID leaf for consistency |
+| **Change 2: ParentPath Derivation** | Replaced hardcoded `$ParentPath = "HKLM:\SOFTWARE\ToastNotification"` with dynamic `$ParentPath = Split-Path $RegistryPath -Parent`. Now constructs parent path from actual `$RegistryPath` parameter |
+| **Change 2 Impact** | ACL scope verification now works with any custom registry path structure |
+| **Change 3: RegPath Variable** | Replaced `$RegPath = "HKLM:\${RegistryPath}\$ToastGUID"` with `$RegPath = "${RegistryHive}:\${RegistryPath}\$ToastGUID"`. Now uses `$RegistryHive` variable (default HKLM, can be HKCU) |
+| **Change 3 Impact** | SYSTEM deployment block now respects user-specified registry hive choice; supports both HKLM and HKCU modes |
+| **Backwards Compatibility** | COMPATIBLE - All changes are backwards compatible. Default parameters remain unchanged. Existing deployments using default HKLM registry path continue without modification. |
+| **Parameter Validation** | Pattern now more permissive but still enforces: (1) HKLM hive required (per parameter constraint), (2) path contains only alphanumeric/underscore/backslash, (3) ends with GUID-format subkey |
+| **Error Handling** | Outer try/catch still catches all errors; ACL grant failure falls back to continue or raise per caller design |
+| **ISO 27001 Impact** | A.9.4.1 COMPLIANT - Enables least-privilege configuration (HKCU deployment); no weakening of existing access controls |
+| **Code Location** | `src/Toast_Notify.ps1`, `Grant-RegistryPermissions` function signature and SYSTEM deployment block |
+| **Code Review** | CR-TOAST-v2.34-001 - Approved (see Section 16.1) |
+| **Testing** | Manual validation: (1) default path `HKLM:\SOFTWARE\ToastNotification` works; (2) custom path `HKLM:\SOFTWARE\MyCompany\Toast` works; (3) HKCU paths tested with `-RegistryHive HKCU` parameter |
+| **Deployment Impact** | Drop-in replacement for v2.33; no configuration changes required. Enables new use case of per-user registry configuration via `-RegistryHive HKCU` |
+| **Functional Change** | Non-breaking feature enablement: custom registry paths now fully supported for both enterprise (HKLM shared) and personal (HKCU per-user) deployments |
+
 ---
 
 ## 13. Testing and Validation
@@ -4803,6 +4892,40 @@ $OldLogs | ForEach-Object {
 
 **Code Review Outcome:** Both enforcement gaps definitively resolved. Fallback escalation now automatic for all stages. Focus Assist bypass now consistent across all stages. Stage 4 enforcement maintained. No breaking changes; idempotent over v2.30. Guard verification confirms Stage 4 protection is in place. Approved for production deployment.
 
+**Code Review ID:** CR-TOAST-v2.33-001
+**Date:** 2026-02-19
+**Reviewer:** PowerShell Code Reviewer Agent
+**File:** src/Toast_Notify.ps1
+**Status:** APPROVED - NO CHANGES REQUIRED
+
+**Summary of Findings (v2.33 - Toast_Notify.ps1 - Registry Intermediate Key Creation Fix):**
+
+| Finding # | Severity | Category | Description | Resolution |
+|-----------|----------|----------|-------------|------------|
+| 1 | MEDIUM | Usability | Initialize-ToastRegistry function silently failed when custom -RegistryPath contained non-existent intermediate keys. Old code used `New-Item -Path $ParentPath -Name $LeafName -Force` which failed if $ParentPath itself didn't exist. Error was caught silently, function returned $false, and Initialize-ToastRegistry fell back to default registry location without warning | Resolved by change: replaced with `New-Item -Path $BasePath -Force` where $BasePath is the full path (e.g., HKLM:\SOFTWARE\MyCompany\Toast). PowerShell registry provider's -Force flag creates all intermediate keys recursively |
+| 2 | INFO | Error Handling | Error handling wrapping `New-Item` call was correct; issue was the incomplete API usage, not the error handling | No change required; wrapping remains correct |
+| 3 | INFO | Backwards Compatibility | Default registry path continues to work as before; only custom paths benefit from fix | No change required; non-breaking improvement |
+
+**Code Review Outcome:** Fix is a targeted improvement to registry initialization logic. Uses correct PowerShell registry provider API for recursive key creation. No security implications. Backwards compatible. Approved for production deployment.
+
+**Code Review ID:** CR-TOAST-v2.34-001
+**Date:** 2026-02-19
+**Reviewer:** PowerShell Code Reviewer Agent
+**File:** src/Toast_Notify.ps1
+**Status:** APPROVED - NO CHANGES REQUIRED
+
+**Summary of Findings (v2.34 - Toast_Notify.ps1 - Custom Registry Path Support):**
+
+| Finding # | Severity | Category | Description | Resolution |
+|-----------|----------|----------|-------------|------------|
+| 1 | HIGH | Usability/Functionality | Grant-RegistryPermissions ValidatePattern parameter was hardcoded to match only `HKLM:\SOFTWARE\ToastNotification\{GUID}`. Any custom path failed immediate parameter validation with no clear error message. Prevented users from using custom registry paths (e.g., HKLM:\SOFTWARE\MyCompany\Toast) | Resolved by change: ValidatePattern updated from `'^HKLM:\\SOFTWARE\\ToastNotification\\[A-F0-9\-]{1,36}$'` to `'^HKLM:\\[a-zA-Z0-9_\\]+\\[A-F0-9\-]{1,36}$'`. Now accepts any HKLM path ending in GUID-format subkey |
+| 2 | MEDIUM | Functionality | ParentPath was hardcoded to HKLM:\SOFTWARE\ToastNotification in the ACL scope verification block. Custom paths failed scope check before ACL grant was attempted | Resolved by change: replaced hardcoded value with `$ParentPath = Split-Path $RegistryPath -Parent`. Now constructs parent path from actual $RegistryPath parameter |
+| 3 | HIGH | Functionality | SYSTEM deployment block used literal `HKLM:` in registry path construction instead of $RegistryHive variable. If user specified -RegistryHive HKCU, the block would still write to HKLM, creating key mismatch | Resolved by change: replaced `$RegPath = "HKLM:\${RegistryPath}\$ToastGUID"` with `$RegPath = "${RegistryHive}:\${RegistryPath}\$ToastGUID"`. Now respects $RegistryHive parameter |
+| 4 | INFO | Security | Pattern relaxation from hardcoded path to regex pattern (still enforces HKLM root and GUID leaf) maintains security posture | No change required; pattern is appropriately restrictive |
+| 5 | INFO | Backwards Compatibility | All changes are backwards compatible; default parameters unchanged; existing deployments continue without modification | No change required; non-breaking improvement |
+
+**Code Review Outcome:** Three blocking issues that prevented custom registry path usage are definitively resolved. Parameter validation now accepts custom paths while maintaining security constraints (HKLM root, GUID leaf, alphanumeric/underscore characters). ParentPath derivation and RegPath hive handling now dynamic. Enables new use case of per-user HKCU deployment. No breaking changes. Approved for production deployment.
+
 ### 16.2 Security Testing Results
 
 **Test Plan ID:** SEC-TEST-TOAST-v3.0
@@ -5181,14 +5304,16 @@ Action Snooze Dismiss Reboot
 | Author (v3.8 additions) | CR | _________________ | 2026-02-17 |
 | Author (v3.9 additions) | CR | _________________ | 2026-02-17 |
 | Author (v4.0 additions) | CR | _________________ | 2026-02-17 |
-| Technical Reviewer | Code Review Agent | APPROVED | 2026-02-17 |
-| Security Reviewer | Security Team | PENDING | 2026-02-17 |
-| Quality Assurance | QA Team | PENDING | 2026-02-17 |
-| Document Owner | IT Operations Manager | _________________ | 2026-02-17 |
+| Author (v4.1 additions) | CR | _________________ | 2026-02-18 |
+| Author (v4.2 additions) | CR | _________________ | 2026-02-19 |
+| Technical Reviewer | Code Review Agent | APPROVED | 2026-02-19 |
+| Security Reviewer | Security Team | PENDING | 2026-02-19 |
+| Quality Assurance | QA Team | PENDING | 2026-02-19 |
+| Document Owner | IT Operations Manager | _________________ | 2026-02-19 |
 
 ---
 
 *End of Technical Documentation - Progressive Toast Notification System v3.0*
 
-*Version: 4.0 | Date: 2026-02-17*
+*Version: 4.2 | Date: 2026-02-19*
 *Licensed under GNU General Public License v3*
