@@ -5,6 +5,12 @@ Created by:   Ben Whitmore
 Filename:     Toast_Notify.ps1
 ===========================================================================
 
+Version 2.34 - 19/02/2026
+-FIX: Grant-RegistryPermissions ValidatePattern hardcoded to SOFTWARE\ToastNotification,
+ blocking any custom -RegistryPath. Pattern now accepts any HKLM\{path}\{GUID} structure.
+ Parent path security check now derived dynamically from input. $RegPath construction in
+ SYSTEM block now uses $RegistryHive variable instead of hardcoded HKLM.
+
 Version 2.33 - 19/02/2026
 -FIX: Initialize-ToastRegistry fails to create base registry path when intermediate keys are missing
  (New-Item -Path $BasePath -Force now used instead of Split-Path dance; registry provider -Force
@@ -751,12 +757,12 @@ function Grant-RegistryPermissions {
         Grant-RegistryPermissions -RegistryPath "HKLM:\SOFTWARE\ToastNotification\ABC-123"
         Grants USERS write access ONLY to the ABC-123 toast instance path
     .NOTES
-        Security validation ensures only ToastNotification\{GUID} paths can be modified
+        Security validation ensures only HKLM\{custom-path}\{GUID} paths can be modified
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [ValidatePattern('^HKLM:\\SOFTWARE\\ToastNotification\\[A-F0-9\-]{1,36}$')]
+        [ValidatePattern('^HKLM:\\[a-zA-Z0-9_\\]+\\[A-F0-9\-]{1,36}$')]
         [String]$RegistryPath
     )
 
@@ -782,7 +788,7 @@ function Grant-RegistryPermissions {
         Set-Acl -Path $RegistryPath -AclObject $Acl
 
         # Verify scope - ensure parent path permissions unchanged
-        $ParentPath = "HKLM:\SOFTWARE\ToastNotification"
+        $ParentPath = Split-Path $RegistryPath -Parent
         if (Test-Path $ParentPath) {
             $ParentAcl = Get-Acl -Path $ParentPath
             $ParentUserRules = $ParentAcl.Access | Where-Object { $_.IdentityReference -eq "BUILTIN\Users" }
@@ -792,7 +798,7 @@ function Grant-RegistryPermissions {
         }
 
         Write-Output "[OK] Registry permissions granted to USERS group for THIS PATH ONLY: $RegistryPath"
-        Write-Output "[OK] Parent path (SOFTWARE\ToastNotification) remains protected"
+        Write-Output "[OK] Parent path ($ParentPath) remains protected"
         return $true
     }
     catch {
@@ -1573,7 +1579,7 @@ If ($XMLValid -eq $True) {
             # Grant permissions if using HKLM (machine-wide state)
             if ($RegistryHive -eq 'HKLM') {
                 Write-Output "Granting USERS group permissions to registry path for snooze handler..."
-                $RegPath = "HKLM:\${RegistryPath}\$ToastGUID"
+                $RegPath = "${RegistryHive}:\${RegistryPath}\$ToastGUID"
                 $PermissionResult = Grant-RegistryPermissions -RegistryPath $RegPath
                 if ($PermissionResult) {
                     Write-Output "[OK] Registry permissions granted - Snooze handler will work from user context"
