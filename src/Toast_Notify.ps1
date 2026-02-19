@@ -5,6 +5,12 @@ Created by:   Ben Whitmore
 Filename:     Toast_Notify.ps1
 ===========================================================================
 
+Version 2.35 - 19/02/2026
+-FIX: Fallback task arguments now forward -RegistryHive and -RegistryPath to the
+ re-invoked Toast_Notify.ps1. Custom registry paths were silently dropped, causing
+ every fallback-triggered toast to read from default SOFTWARE\ToastNotification
+ (path not found), default to SnoozeCount=0, and display Stage 0 indefinitely.
+
 Version 2.34 - 19/02/2026
 -FIX: Grant-RegistryPermissions ValidatePattern hardcoded to SOFTWARE\ToastNotification,
  blocking any custom -RegistryPath. Pattern now accepts any HKLM\{path}\{GUID} structure.
@@ -2013,6 +2019,8 @@ If ($XMLValid -eq $True) {
                         " -XMLSource `"$XMLSource`"" +
                         " -ToastScenario `"$ToastScenario`"" +
                         " -RebootCountdownMinutes $RebootCountdownMinutes" +
+                        " -RegistryHive `"$RegistryHive`"" +
+                        " -RegistryPath `"$RegistryPath`"" +
                         " -Snooze" +
                         $FallbackAdvanceStage
 

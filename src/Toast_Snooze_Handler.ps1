@@ -5,6 +5,12 @@ Created by:   Ben Whitmore (with AI assistance)
 Filename:     Toast_Snooze_Handler.ps1
 ===========================================================================
 
+Version 1.12 - 19/02/2026
+-FIX: Task arguments now forward -RegistryHive and -RegistryPath to Toast_Notify.ps1
+ invocation, ensuring custom registry paths are preserved across snooze cycles.
+ Previously the re-invoked script defaulted to SOFTWARE\ToastNotification, read
+ no state, and always showed Stage 0 (2hr button) regardless of actual SnoozeCount.
+
 Version 1.11 - 18/02/2026
 -RebootCountdownMinutes now read from HKLM registry (stored by Toast_Notify.ps1 v2.30)
 -RebootCountdownMinutes now included in snooze task action arguments
@@ -483,6 +489,8 @@ try {
             " -XMLSource `"$StoredXMLSource`"" +
             " -ToastScenario `"$StoredToastScenario`"" +
             " -RebootCountdownMinutes $StoredRebootCountdownMinutes" +
+            " -RegistryHive `"$RegistryHive`"" +
+            " -RegistryPath `"$RegistryPath`"" +
             " -Snooze"
         $TaskAction = New-ScheduledTaskAction `
             -Execute "C:\WINDOWS\system32\WindowsPowerShell\v1.0\PowerShell.exe" `
