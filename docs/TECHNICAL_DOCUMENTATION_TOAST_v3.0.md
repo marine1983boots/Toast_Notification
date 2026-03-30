@@ -41,6 +41,7 @@
 | 4.2 | 2026-02-19 | CR | Updated for v2.33 (fixed Initialize-ToastRegistry intermediate key creation: replaced Split-Path/New-Item -Name with New-Item -Path -Force for full recursive key creation) and v2.34 (fixed Grant-RegistryPermissions hardcoded registry paths: ValidatePattern relaxed from hardcoded SOFTWARE\ToastNotification to accept any HKLM\{path}\{GUID}, ParentPath now derived via Split-Path, RegPath in SYSTEM block uses $RegistryHive variable); added Section 12.18 (v2.33 changelog), Section 12.19 (v2.34 changelog); added code review records CR-TOAST-v2.33-001 and CR-TOAST-v2.34-001 |
 | 4.3 | 2026-02-19 | CR | Updated for v2.37/v2.38 (Toast_Notify.ps1: v2.37 comprehensive parameter forwarding audit - Priority/ForceDisplay/Dismiss switches now forwarded through all three re-invocation paths; v2.38 dynamic AUMID generation from sanitized AppIDName avoiding Windows notification caching issue), v1.14 (Toast_Snooze_Handler.ps1: added Priority/ForceDisplay/Dismiss switch parameters with conditional forwarding in task arguments), v1.5/v1.3 (Toast_Reboot_Handler.ps1 and Toast_Dismiss_Handler.ps1: replaced Disable-ScheduledTask with Unregister-ScheduledTask for SYSTEM-owned main task cleanup; non-fatal [INFO] logging for Access Denied on main task); added Section 12.2.13 (parameter forwarding architecture), Sections 12.20-12.22 (changelogs for v2.37/v2.38/v1.14/v1.5/v1.3); added code review records CR-TOAST-v2.37-001, CR-TOAST-v2.38-001, CR-TOAST-v1.14-001, CR-TOAST-v1.5-001, CR-TOAST-v1.3-001 |
 | 4.4 | 2026-03-30 | CR | Updated for v2.42/v1.16 (Toast_Notify.ps1 v2.42: added -Silent switch to suppress all toast audio via <audio silent="true"/> in XML, overriding default chime and looping alarm at all stages; added -NoActionButton switch to hide Learn More action button in Stages 0-2 and simple notification mode, preventing empty button box when ButtonTitle is blank; both switches forwarded through all three re-invocation paths: main scheduled task, toast-snooze:// protocol handler, fallback task); (Toast_Snooze_Handler.ps1 v1.16: added -Silent and -NoActionButton switch parameters to param block and forwarded in $TaskArguments to preserve preferences across all snooze cycles); updated Section 6.1 (Toast_Notify.ps1 parameters table), Section 6.2 (Toast_Snooze_Handler.ps1 parameters table), Section 11.7 (parameter reference), README.md parameters section, and added Sections 12.23-12.24 with full changelogs and code review records CR-TOAST-v2.42-001 and CR-TOAST-v1.16-001 |
+| 4.5 | 2026-03-30 | CR | Documentation audit corrections: Removed deprecated -EnableProgressive and -SnoozeCount parameters from Section 6.1 (removed in v2.11; stage progression now controlled exclusively via -Snooze switch and registry state). Added -TestMode parameter documentation to Section 6.1 (skips automatic reboot at Stage 4 for testing escalation chain). Updated Section 6.2 Toast_Snooze_Handler.ps1 parameters table to v1.16 accuracy: added AppIDName (added v1.13), Priority (added v1.14), ForceDisplay (added v1.14), and Dismiss (added v1.14) parameters with forwarding behavior. Corrected deprecated action argument examples in Section 6.2 (removed -EnableProgressive and -SnoozeCount; updated to use -Snooze with -AppIDName and switch parameters correctly forwarded). Added -TestMode documentation to README.md parameters section. |
 
 ## Table of Contents
 
@@ -700,16 +701,15 @@ This prevents:
 | Parameter | Type | Default | Mandatory | Validation | Purpose |
 |-----------|------|---------|-----------|------------|---------|
 | XMLSource | String | "CustomMessage.xml" | No | File must exist | XML configuration filename |
-| Snooze | Switch | $false | No | N/A | Enable classic snooze dropdown |
-| ToastScenario | String | "alarm" | No | alarm, urgent, reminder, default | Toast notification priority |
-| ToastGUID | String | Auto-generated | No | `^[A-F0-9\-]{1,36}$` | Unique identifier |
-| EnableProgressive | Switch | $false | No | N/A | Enable progressive enforcement |
-| SnoozeCount | Int | 0 | No | 0-4 | Current stage level |
+| Snooze | Switch | $false | No | N/A | Enable progressive enforcement with 5-stage escalation |
+| ToastScenario | String | "alarm" | No | alarm, urgent, reminder, default | Toast notification priority (overridden per stage in snooze mode) |
+| ToastGUID | String | Auto-generated | No | `^[A-F0-9\-]{1,36}$` | Unique identifier for state tracking across snooze cycles |
 | Priority | Switch | $false | No | N/A | Set High priority (Win10 15063+) |
 | ForceDisplay | Switch | $false | No | N/A | Maximum visibility mode |
 | Manufacturer | String | "" | No | ValidateLength 0-64 | Organization/product name for {MANUFACTURER} token replacement |
 | Silent | Switch | $false | No | N/A | Suppress all toast audio (overrides default chime and looping alarm at all stages) |
 | NoActionButton | Switch | $false | No | N/A | Hide Learn More action button in Stages 0-2 and simple notification mode |
+| TestMode | Switch | $false | No | N/A | Skip automatic reboot at Stage 4 (for testing escalation chain) |
 
 **Helper Functions:**
 
@@ -755,7 +755,7 @@ See Section 5.1 (Dual-Mode Execution Model) for detailed flow diagrams.
 
 ### 6.2 Toast_Snooze_Handler.ps1
 
-**Version:** 1.9
+**Version:** 1.16
 **Language:** PowerShell 5.0+
 **Execution Context:** User (invoked via toast-snooze:// protocol handler)
 
@@ -767,6 +767,10 @@ See Section 5.1 (Dual-Mode Execution Model) for detailed flow diagrams.
 | RegistryHive | String | No | HKLM or HKCU | Registry hive for toast state (default: HKLM) |
 | RegistryPath | String | No | Pattern: `^[a-zA-Z0-9_\\]+$` | Registry path under hive (default: SOFTWARE\ToastNotification) |
 | LogDirectory | String | No | Valid path | Log output directory (default: %WINDIR%\Temp) |
+| AppIDName | String | No | ValidateLength 1-128 | Display name shown in Windows notification system (default: 'System IT'); forwarded to next Toast_Notify.ps1 invocation |
+| Priority | Switch | No | N/A | Set High priority in next Toast_Notify.ps1 invocation (forwarded in task arguments) |
+| ForceDisplay | Switch | No | N/A | Enable maximum visibility mode in next Toast_Notify.ps1 invocation (forwarded in task arguments) |
+| Dismiss | Switch | No | N/A | Show dismiss button in next Toast_Notify.ps1 invocation (forwarded in task arguments) |
 | Manufacturer | String | No | ValidateLength 0-64 | Organization/product name for {MANUFACTURER} token replacement in snooze cycles |
 | Silent | Switch | No | N/A | Suppress all toast audio in next Toast_Notify.ps1 invocation (forwarded in task arguments) |
 | NoActionButton | Switch | No | N/A | Hide Learn More action button in next Toast_Notify.ps1 invocation (forwarded in task arguments) |
@@ -799,9 +803,9 @@ See Section 5.1 (Dual-Mode Execution Model) for detailed flow diagrams.
     - StartWhenAvailable: true (handles offline/overnight scenarios)
     - DeleteExpiredTaskAfter: 4 hours after EndBoundary
     - Principal: $env:USERNAME, Interactive, Limited
-    - Action: PowerShell.exe -File Toast_Notify.ps1 -ToastGUID "{GUID}" -EnableProgressive
-              -SnoozeCount {N} -XMLSource "{XMLSource}" -ToastScenario "{ToastScenario}" -Manufacturer "{Manufacturer}"
-              -Silent (if set) -NoActionButton (if set)
+    - Action: PowerShell.exe -File Toast_Notify.ps1 -ToastGUID "{GUID}" -Snooze
+              -XMLSource "{XMLSource}" -ToastScenario "{ToastScenario}" -AppIDName "{AppIDName}" -Manufacturer "{Manufacturer}"
+              -Priority (if set) -ForceDisplay (if set) -Dismiss (if set) -Silent (if set) -NoActionButton (if set)
 13. Verify task creation
 14. Log completion and exit
 ```

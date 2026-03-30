@@ -155,6 +155,14 @@ Hide the Learn More action button in Stages 0-2 (snooze mode) and simple notific
 - With `-NoActionButton`: button hidden; useful for notification-only toasts
 - Stage 3 and 4 are protected separately (Stage 3 shows only Reboot button, Stage 4 shows only Reboot with no Dismiss)
 
+**.PARAMETER TestMode**
+
+Skip automatic reboot at Stage 4 for testing purposes.
+
+- Default: $false (automatic reboot enabled at Stage 4)
+- With `-TestMode`: Stage 4 displays the final reboot notification but does NOT initiate system shutdown; useful for testing the full escalation chain without interrupting the machine
+- Note: The countdown message will still display with the configured RebootCountdownMinutes value, but the actual shutdown.exe command is not executed
+
 ---
 
 ## Deployment
