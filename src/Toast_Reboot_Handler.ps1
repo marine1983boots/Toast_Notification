@@ -196,7 +196,7 @@ try {
 
                 # Initiate immediate reboot (10 second warning)
                 Write-Output "Initiating reboot in 10 seconds..."
-                $RebootCommand = "shutdown.exe /r /t 10 /c `"BIOS Update: Reboot initiated by user. System will restart in 10 seconds. Save your work now!`" /d p:2:18"
+                $RebootCommand = "shutdown.exe /r /t 10 /g /c `"BIOS Update: Reboot initiated by user. System will restart in 10 seconds. Save your work now!`" /d p:2:18"
                 Write-Output "Executing: $RebootCommand"
 
                 Invoke-Expression $RebootCommand
