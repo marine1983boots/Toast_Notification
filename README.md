@@ -2,7 +2,7 @@
 
 A PowerShell-based enterprise toast notification system for Windows 10/11 with progressive enforcement, designed for SCCM/Intune deployment.
 
-**Current version:** Toast_Notify.ps1 v2.31
+**Current version:** Toast_Notify.ps1 v2.42
 **Production release:** v1.0.0
 
 ---
@@ -139,6 +139,21 @@ High priority notification mode.
 **.PARAMETER AdvanceStage**
 
 Increments the stage counter before displaying. Used internally by fallback scheduled tasks - do not pass manually.
+
+**.PARAMETER Silent**
+
+Suppress all toast audio by setting `<audio silent="true"/>` in the toast XML. Overrides default notification chime (Stage 0) and looping alarm (Stages 1-3) at all stages. Audio preferences persist across snooze cycles when used with `-Snooze`.
+
+- Default: audio enabled (behavior determined by ToastScenario)
+- With `-Silent`: no sound regardless of stage or scenario
+
+**.PARAMETER NoActionButton**
+
+Hide the Learn More action button in Stages 0-2 (snooze mode) and simple notification mode. Prevents empty button box when ButtonTitle is blank in XML.
+
+- Default: button visible (if ButtonTitle configured)
+- With `-NoActionButton`: button hidden; useful for notification-only toasts
+- Stage 3 and 4 are protected separately (Stage 3 shows only Reboot button, Stage 4 shows only Reboot with no Dismiss)
 
 ---
 

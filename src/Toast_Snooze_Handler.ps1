@@ -5,6 +5,11 @@ Created by:   Ben Whitmore (with AI assistance)
 Filename:     Toast_Snooze_Handler.ps1
 ===========================================================================
 
+Version 1.16 - 30/03/2026
+-Added -Silent and -NoActionButton switch parameters to param block.
+-Both switches forwarded in $TaskArguments to the next Toast_Notify.ps1 invocation,
+ preserving audio and button display preferences across all snooze cycles.
+
 Version 1.15 - 19/02/2026
 -ADD: Added $Manufacturer string parameter (ValidateLength 0-64, default "").
  Forwarded in $TaskArguments to the next Toast_Notify.ps1 invocation so custom
@@ -196,7 +201,11 @@ Param(
     [Switch]$Dismiss,
     [Parameter(Mandatory = $false)]
     [ValidateLength(0, 64)]
-    [String]$Manufacturer = ""
+    [String]$Manufacturer = "",
+    [Parameter(Mandatory = $false)]
+    [Switch]$Silent,
+    [Parameter(Mandatory = $false)]
+    [Switch]$NoActionButton
 )
 
 #region Helper Functions
@@ -525,6 +534,8 @@ try {
         if ($Priority) { $TaskArguments += " -Priority" }
         if ($ForceDisplay) { $TaskArguments += " -ForceDisplay" }
         if ($Dismiss) { $TaskArguments += " -Dismiss" }
+        if ($Silent) { $TaskArguments += " -Silent" }
+        if ($NoActionButton) { $TaskArguments += " -NoActionButton" }
         $TaskAction = New-ScheduledTaskAction `
             -Execute "C:\WINDOWS\system32\WindowsPowerShell\v1.0\PowerShell.exe" `
             -Argument $TaskArguments

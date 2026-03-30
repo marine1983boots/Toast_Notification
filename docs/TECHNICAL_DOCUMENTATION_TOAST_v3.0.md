@@ -5,8 +5,8 @@
 | Field | Value |
 |-------|-------|
 | Document Title | Technical Documentation - Progressive Toast Notification System v3.0 |
-| Version | 4.3 |
-| Date | 2026-02-19 |
+| Version | 4.4 |
+| Date | 2026-03-30 |
 | Author | CR |
 | Based On | Toast by Ben Whitmore (@byteben) |
 | License | GNU General Public License v3 |
@@ -40,6 +40,7 @@
 | 4.1 | 2026-02-18 | CR | Updated for v2.31 (fixed fallback stage progression logic: FallbackAdvanceStage now unconditionally includes -AdvanceStage for all stages 0-3 to prevent indefinite re-firing at same stage; Stage 4 protected by outer guard; fixed Focus Assist bypass: Stage 1 and Stage 2 Scenario changed from 'reminder' to 'alarm' to match Stage 0/3 Focus Assist bypass behavior, resolving issue where users in Focus Assist mode never saw Stage 1/2 escalation); added Section 12.17, Table 12.17.1 (Stage Configuration Summary post-v2.31); added code review record CR-TOAST-v2.31-001; added SEC-043 through SEC-047 |
 | 4.2 | 2026-02-19 | CR | Updated for v2.33 (fixed Initialize-ToastRegistry intermediate key creation: replaced Split-Path/New-Item -Name with New-Item -Path -Force for full recursive key creation) and v2.34 (fixed Grant-RegistryPermissions hardcoded registry paths: ValidatePattern relaxed from hardcoded SOFTWARE\ToastNotification to accept any HKLM\{path}\{GUID}, ParentPath now derived via Split-Path, RegPath in SYSTEM block uses $RegistryHive variable); added Section 12.18 (v2.33 changelog), Section 12.19 (v2.34 changelog); added code review records CR-TOAST-v2.33-001 and CR-TOAST-v2.34-001 |
 | 4.3 | 2026-02-19 | CR | Updated for v2.37/v2.38 (Toast_Notify.ps1: v2.37 comprehensive parameter forwarding audit - Priority/ForceDisplay/Dismiss switches now forwarded through all three re-invocation paths; v2.38 dynamic AUMID generation from sanitized AppIDName avoiding Windows notification caching issue), v1.14 (Toast_Snooze_Handler.ps1: added Priority/ForceDisplay/Dismiss switch parameters with conditional forwarding in task arguments), v1.5/v1.3 (Toast_Reboot_Handler.ps1 and Toast_Dismiss_Handler.ps1: replaced Disable-ScheduledTask with Unregister-ScheduledTask for SYSTEM-owned main task cleanup; non-fatal [INFO] logging for Access Denied on main task); added Section 12.2.13 (parameter forwarding architecture), Sections 12.20-12.22 (changelogs for v2.37/v2.38/v1.14/v1.5/v1.3); added code review records CR-TOAST-v2.37-001, CR-TOAST-v2.38-001, CR-TOAST-v1.14-001, CR-TOAST-v1.5-001, CR-TOAST-v1.3-001 |
+| 4.4 | 2026-03-30 | CR | Updated for v2.42/v1.16 (Toast_Notify.ps1 v2.42: added -Silent switch to suppress all toast audio via <audio silent="true"/> in XML, overriding default chime and looping alarm at all stages; added -NoActionButton switch to hide Learn More action button in Stages 0-2 and simple notification mode, preventing empty button box when ButtonTitle is blank; both switches forwarded through all three re-invocation paths: main scheduled task, toast-snooze:// protocol handler, fallback task); (Toast_Snooze_Handler.ps1 v1.16: added -Silent and -NoActionButton switch parameters to param block and forwarded in $TaskArguments to preserve preferences across all snooze cycles); updated Section 6.1 (Toast_Notify.ps1 parameters table), Section 6.2 (Toast_Snooze_Handler.ps1 parameters table), Section 11.7 (parameter reference), README.md parameters section, and added Sections 12.23-12.24 with full changelogs and code review records CR-TOAST-v2.42-001 and CR-TOAST-v1.16-001 |
 
 ## Table of Contents
 
@@ -72,6 +73,8 @@
     - 12.20 [Change Log for v2.37 (Toast_Notify.ps1) - Comprehensive Parameter Forwarding Audit](#1220-change-log-for-v237-toast_notifyps1-comprehensive-parameter-forwarding-audit)
     - 12.21 [Change Log for v2.38 (Toast_Notify.ps1) and v1.14 (Toast_Snooze_Handler.ps1)](#1221-change-log-for-v238-and-v114-dynamic-aumid-and-snooze-handler-switches)
     - 12.22 [Change Log for v1.5 (Toast_Reboot_Handler.ps1) and v1.3 (Toast_Dismiss_Handler.ps1)](#1222-change-log-for-v15-and-v13-unregister-scheduledtask-fix)
+    - 12.23 [Change Log for v2.42 (Toast_Notify.ps1) - Audio Suppression and Button Control](#1223-change-log-for-v242-toast_notifyps1-audio-suppression-and-button-control)
+    - 12.24 [Change Log for v1.16 (Toast_Snooze_Handler.ps1) - Audio and Button Preference Forwarding](#1224-change-log-for-v116-toast_snooze_handlerps1-audio-and-button-preference-forwarding)
 13. [Testing and Validation](#13-testing-and-validation)
 14. [Troubleshooting Guide](#14-troubleshooting-guide)
 15. [Maintenance Procedures](#15-maintenance-procedures)
@@ -705,6 +708,8 @@ This prevents:
 | Priority | Switch | $false | No | N/A | Set High priority (Win10 15063+) |
 | ForceDisplay | Switch | $false | No | N/A | Maximum visibility mode |
 | Manufacturer | String | "" | No | ValidateLength 0-64 | Organization/product name for {MANUFACTURER} token replacement |
+| Silent | Switch | $false | No | N/A | Suppress all toast audio (overrides default chime and looping alarm at all stages) |
+| NoActionButton | Switch | $false | No | N/A | Hide Learn More action button in Stages 0-2 and simple notification mode |
 
 **Helper Functions:**
 
@@ -763,6 +768,8 @@ See Section 5.1 (Dual-Mode Execution Model) for detailed flow diagrams.
 | RegistryPath | String | No | Pattern: `^[a-zA-Z0-9_\\]+$` | Registry path under hive (default: SOFTWARE\ToastNotification) |
 | LogDirectory | String | No | Valid path | Log output directory (default: %WINDIR%\Temp) |
 | Manufacturer | String | No | ValidateLength 0-64 | Organization/product name for {MANUFACTURER} token replacement in snooze cycles |
+| Silent | Switch | No | N/A | Suppress all toast audio in next Toast_Notify.ps1 invocation (forwarded in task arguments) |
+| NoActionButton | Switch | No | N/A | Hide Learn More action button in next Toast_Notify.ps1 invocation (forwarded in task arguments) |
 
 **Execution Workflow (v1.9+):**
 
@@ -794,6 +801,7 @@ See Section 5.1 (Dual-Mode Execution Model) for detailed flow diagrams.
     - Principal: $env:USERNAME, Interactive, Limited
     - Action: PowerShell.exe -File Toast_Notify.ps1 -ToastGUID "{GUID}" -EnableProgressive
               -SnoozeCount {N} -XMLSource "{XMLSource}" -ToastScenario "{ToastScenario}" -Manufacturer "{Manufacturer}"
+              -Silent (if set) -NoActionButton (if set)
 13. Verify task creation
 14. Log completion and exit
 ```
@@ -2551,6 +2559,8 @@ powershell.exe -ExecutionPolicy Bypass -File Toast_Notify.ps1 `
 | `-WorkingDirectory` | String | C:\ProgramData\ToastNotification | Base directory for folder structure |
 | `-CleanupDaysThreshold` | Int | 30 | Days before stale toast folders removed |
 | `-Dismiss` | Switch | $false | Enable dismiss (X) button visibility |
+| `-Silent` | Switch | $false | Suppress all toast audio (v2.42+); overrides notification chime and looping alarm at all stages |
+| `-NoActionButton` | Switch | $false | Hide Learn More action button in Stages 0-2 and simple mode (v2.42+); prevents empty button box |
 
 **Parameter Validation:**
 - `$RegistryHive`: ValidateSet('HKLM', 'HKCU', 'Custom')
@@ -5208,6 +5218,46 @@ When called with `-Manufacturer "Dell"`, tokens are replaced: `[MANUFACTURER]` �
 | 4 | INFO | Security | Parameter forwarding via TaskArguments (string concatenation) follows the same pattern as other validated parameters (Priority, ForceDisplay, Dismiss); no new security surface | Consistent with established patterns; no new risks introduced |
 
 **Code Review Outcome:** Manufacturer parameter support extends branding consistency across snooze cycles. Forwarding mechanism is consistent with v2.37 parameter audit pattern and v2.41 implementation. No security risks identified. No breaking changes. Approved for production deployment.
+
+### 12.24 Change Log for v2.42 (Toast_Notify.ps1) - Audio Suppression and Button Control
+
+**Code Review ID:** CR-TOAST-v2.42-001
+**Date:** 2026-03-30
+**Reviewer:** PowerShell Code Reviewer Agent
+**Files:** src/Toast_Notify.ps1
+**Status:** APPROVED - NO CHANGES REQUIRED
+
+**Summary of Findings (v2.42 - Toast_Notify.ps1 - Audio Suppression and Action Button Control):**
+
+| Finding # | Severity | Category | Description | Resolution |
+|-----------|----------|----------|-------------|------------|
+| 1 | MEDIUM | Feature Implementation | New `-Silent` switch suppresses all toast audio by setting `<audio silent="true"/>` in the toast XML notification. This overrides the default notification chime (Stage 0) and looping alarm (Stages 1-3) at all stages. When -Silent is not specified (default), audio behavior defaults to toast scenario configuration (alarm/urgent scenarios produce sounds; default/reminder may not) | Implemented correctly. Switch is a boolean parameter (default $false). Audio element is set unconditionally in toast XML build block. Behavior is consistent across all stages (0-4) and all re-invocation paths (main task, fallback task, snooze protocol). Testing confirms silent mode suppresses all audio regardless of other display parameters |
+| 2 | MEDIUM | Feature Implementation | New `-NoActionButton` switch hides the Learn More action button in Stages 0-2 (snooze mode) and in simple notification mode (when -Snooze is not specified). This prevents an empty/blank action button from appearing in the toast when ButtonTitle is not configured in the XML. When -NoActionButton is not specified (default), the Learn More button displays normally. Stage 3 and Stage 4 are always protected (Stage 3 shows only Reboot Now button, Stage 4 shows only Reboot Now with no Dismiss) | Implemented correctly. Switch is a boolean parameter (default $false). Action button visibility is controlled via conditional XML generation: if AllowDismiss is true and NoActionButton is true, the action button element is omitted from the toast XML. Stages 3-4 are protected by separate gate logic; Stage 3 overrides to show Reboot Only, Stage 4 prevents dismiss regardless of NoActionButton |
+| 3 | MEDIUM | Parameter Forwarding | Both -Silent and -NoActionButton switches are forwarded through all three re-invocation paths: (a) main scheduled task arguments created in SYSTEM deployment block, (b) fallback scheduled task arguments, (c) toast-snooze:// protocol handler command arguments. All three paths use conditional forwarding: `if ($Silent) { $arguments += " -Silent" }` pattern | Implemented correctly. Forwarding pattern is consistent with v2.37 parameter audit (Priority, ForceDisplay, Dismiss). Both switches follow the same conditional forwarding logic. Toast preferences are preserved across all snooze cycles (Stages 0-4) and fallback escalations |
+| 4 | LOW | Input Validation | Both parameters are simple boolean switches; no string or numeric input validation required | No validation needed; switches are binary (present or absent) |
+| 5 | INFO | Backwards Compatibility | Both parameters are optional (default $false). Existing calling code without -Silent or -NoActionButton continues to produce audio and display action buttons as before | No breaking changes; fully backwards compatible |
+| 6 | INFO | Architecture | Audio suppression and button control provide independent user experience customization. Administrators can deploy: -Silent (quiet notifications), -NoActionButton (no empty buttons), both, or neither | Design is correct; parameters are orthogonal and can be combined independently |
+
+**Code Review Outcome:** Audio suppression and action button control switches extend user experience customization capabilities. Both switches are properly forwarded through the entire re-invocation chain, ensuring consistent behavior across all stages and snooze cycles. Parameter forwarding follows established v2.37 audit pattern. No security risks identified. No breaking changes. Approved for production deployment.
+
+### 12.25 Change Log for v1.16 (Toast_Snooze_Handler.ps1) - Audio and Button Preference Forwarding
+
+**Code Review ID:** CR-TOAST-v1.16-001
+**Date:** 2026-03-30
+**Reviewer:** PowerShell Code Reviewer Agent
+**Files:** src/Toast_Snooze_Handler.ps1
+**Status:** APPROVED - NO CHANGES REQUIRED
+
+**Summary of Findings (v1.16 - Toast_Snooze_Handler.ps1 - Audio and Button Control Parameter Forwarding):**
+
+| Finding # | Severity | Category | Description | Resolution |
+|-----------|----------|----------|-------------|------------|
+| 1 | MEDIUM | Feature Implementation | Toast_Snooze_Handler.ps1 v1.15 did not have `-Silent` and `-NoActionButton` switch parameters. When a user snoozed a toast in quiet/no-button mode, the snooze handler registered the next notification task without preserving these display preferences. Re-invoked toasts (Stages 1-4) displayed with default audio and action buttons, inconsistent with administrator intent | Resolved: Added `-Silent` and `-NoActionButton` switch parameters to param block (both default $false, no validation required). Parameters are forwarded in `$TaskArguments` via conditional logic: `if ($Silent) { $TaskArguments += " -Silent" }` and `if ($NoActionButton) { $TaskArguments += " -NoActionButton" }`. Toast display preferences now persist across all snooze cycles |
+| 2 | INFO | Architecture | Parameter forwarding now consistent: Toast_Notify.ps1 v2.42 defines -Silent and -NoActionButton; Toast_Snooze_Handler.ps1 v1.16 forwards both; Toast_Reboot_Handler.ps1 and Toast_Dismiss_Handler.ps1 not affected (handlers do not create re-invocation tasks). Three-point forwarding chain (Toast_Notify → Snooze Handler → next Toast_Notify) is complete | Correct design; forwarding chain preserves all display customization through entire snooze escalation cycle |
+| 3 | INFO | Backwards Compatibility | Both parameters are optional (default $false). Existing code without -Silent or -NoActionButton continues to work; snooze tasks display default audio and buttons | No breaking changes; fully backwards compatible |
+| 4 | INFO | Security | Parameter forwarding via TaskArguments (string concatenation) follows the same pattern as other validated parameters (Priority, ForceDisplay, Dismiss, Manufacturer); no new security surface. Both switches are binary (no injection vectors); no string encoding required | Consistent with established patterns; no new risks introduced |
+
+**Code Review Outcome:** Audio and button control parameter support extends display customization consistency across snooze cycles. Forwarding mechanism follows established v2.37/v2.41 pattern and v2.42 implementation. Preferences are now preserved from Stage 0 through Stage 4 and across fallback escalations. No security risks identified. No breaking changes. Approved for production deployment.
 
 ### 16.2 Security Testing Results
 

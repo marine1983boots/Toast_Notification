@@ -5,6 +5,14 @@ Created by:   Ben Whitmore
 Filename:     Toast_Notify.ps1
 ===========================================================================
 
+Version 2.42 - 30/03/2026
+-Added -Silent switch: suppresses all toast audio by setting <audio silent="true"/> in the toast XML.
+ Overrides default notification chime and looping alarm at all stages.
+-Added -NoActionButton switch: hides the Learn More action button in Stages 0-2 (snooze mode)
+ and in simple notification mode. Prevents the empty button box when ButtonTitle is blank in XML.
+-Both switches forwarded through all three re-invocation paths: main scheduled task,
+ toast-snooze:// protocol handler command, and fallback scheduled task.
+
 Version 2.41 - 19/02/2026
 -ADD: Restore -Manufacturer string parameter (ValidateLength 0-64, default ""). When supplied,
  replaces {MANUFACTURER} tokens in EventTitle, ToastTitle, and EventText at runtime, allowing
@@ -424,6 +432,16 @@ configuration. Used by Stage 3 fallback tasks to advance to Stage 4 (auto-reboot
 user has not rebooted after the final warning period expires.
 Default: $false
 
+.PARAMETER Silent
+Suppress all toast audio. Sets <audio silent="true"/> in the toast XML, overriding the
+default notification chime and looping alarm audio at all stages including Stage 3 and 4.
+Default: $false
+
+.PARAMETER NoActionButton
+Hide the Learn More action button. Applies to Stages 0-2 in snooze mode and to simple
+notification mode. Avoids the empty button box when ButtonTitle is blank in the XML config.
+Default: $false
+
 .PARAMETER Manufacturer
 Optional OEM manufacturer name (e.g. "HP", "Lenovo", "Dell"). Replaces {MANUFACTURER} tokens
 in EventTitle, ToastTitle, and EventText loaded from the XML config file at runtime. If not
@@ -461,6 +479,14 @@ Custom working directory with organized folder structure: D:\CustomToasts\{GUID}
 .EXAMPLE
 Toast_Notify.ps1 -Snooze -WorkingDirectory "C:\ProgramData\Notifications" -CleanupDaysThreshold 7
 Custom location with aggressive cleanup (removes toast folders older than 7 days)
+
+.EXAMPLE
+Toast_Notify.ps1 -Snooze -Silent
+Silent snooze notification with no audio at any stage.
+
+.EXAMPLE
+Toast_Notify.ps1 -Snooze -NoActionButton
+Snooze notification without the Learn More button (no empty box).
 
 .EXAMPLE
 Toast_Notify.ps1 -Dismiss -XMLSource "InformationalMessage.xml"
@@ -514,7 +540,11 @@ Param
     [Switch]$AdvanceStage = $false,
     [Parameter(Mandatory = $False)]
     [ValidateLength(0, 64)]
-    [String]$Manufacturer = ""
+    [String]$Manufacturer = "",
+    [Parameter(Mandatory = $False)]
+    [Switch]$Silent,
+    [Parameter(Mandatory = $False)]
+    [Switch]$NoActionButton
 )
 
 #region Helper Functions
@@ -1724,6 +1754,8 @@ If ($XMLValid -eq $True) {
                 If ($Priority) { $CommandParams += " -Priority" }
                 If ($ForceDisplay) { $CommandParams += " -ForceDisplay" }
                 If ($Dismiss) { $CommandParams += " -Dismiss" }
+                If ($Silent) { $CommandParams += " -Silent" }
+                If ($NoActionButton) { $CommandParams += " -NoActionButton" }
                 $CommandValue = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$HandlerPath`" $CommandParams"
                 Set-ItemProperty -Path $CommandKey -Name "(Default)" -Value $CommandValue -Force
 
@@ -1824,6 +1856,12 @@ If ($XMLValid -eq $True) {
         }
         If ($Dismiss) {
             $TaskArguments += " -Dismiss"
+        }
+        If ($Silent) {
+            $TaskArguments += " -Silent"
+        }
+        If ($NoActionButton) {
+            $TaskArguments += " -NoActionButton"
         }
         $Task_Action = New-ScheduledTaskAction -Execute "C:\WINDOWS\system32\WindowsPowerShell\v1.0\PowerShell.exe" -Argument $TaskArguments
         $Task_Trigger = New-ScheduledTaskTrigger -Once -At $Task_TimeToRun
@@ -2064,6 +2102,8 @@ If ($XMLValid -eq $True) {
                         "$(if ($Priority) { ' -Priority' } else { '' })" +
                         "$(if ($ForceDisplay) { ' -ForceDisplay' } else { '' })" +
                         "$(if ($Dismiss) { ' -Dismiss' } else { '' })" +
+                        "$(if ($Silent) { ' -Silent' } else { '' })" +
+                        "$(if ($NoActionButton) { ' -NoActionButton' } else { '' })" +
                         " -Snooze" +
                         $FallbackAdvanceStage
 
@@ -2197,13 +2237,20 @@ If ($XMLValid -eq $True) {
         $EventTitle_Safe = ConvertTo-XmlSafeString $EventTitle
         $EventText_Safe = ConvertTo-XmlSafeString $EventText
 
-        # Determine audio based on stage (if progressive) or default
-        $AudioSrc = "ms-winsoundevent:notification.default"
-        $AudioLoop = ""
-        If ($Snooze -and $StageConfig.AudioLoop) {
-            $AudioSrc = "ms-winsoundevent:notification.looping.alarm"
-            $AudioLoop = 'loop="true"'
-            Write-Output "Using looping alarm audio for Stage $($StageConfig.Stage)"
+        # Determine audio element
+        if ($Silent) {
+            $AudioElement = '<audio silent="true"/>'
+            Write-Output "Audio suppressed (-Silent switch)"
+        }
+        else {
+            $AudioSrc = "ms-winsoundevent:notification.default"
+            $AudioLoop = ""
+            If ($Snooze -and $StageConfig.AudioLoop) {
+                $AudioSrc = "ms-winsoundevent:notification.looping.alarm"
+                $AudioLoop = 'loop="true"'
+                Write-Output "Using looping alarm audio for Stage $($StageConfig.Stage)"
+            }
+            $AudioElement = "<audio src=`"$AudioSrc`" $AudioLoop/>"
         }
 
         #Build XML ToastTemplate
@@ -2228,7 +2275,7 @@ If ($XMLValid -eq $True) {
             </group>
         </binding>
     </visual>
-    <audio src="$AudioSrc" $AudioLoop/>
+    $AudioElement
 </toast>
 "@
 
@@ -2277,8 +2324,13 @@ If ($XMLValid -eq $True) {
             elseif ($StageConfig.Stage -lt 3) {
                 # Stages 0-2 only: Add generic action button (e.g. Learn More / BIOS info URL)
                 # Stage 3: Final warning - no generic button, only Reboot Now (added via AllowDismiss block)
-                Write-Output "Adding action button: $ButtonTitle_Safe"
-                $ActionsXML += "<action arguments=`"$ButtonAction_Safe`" content=`"$ButtonTitle_Safe`" activationType=`"protocol`" />"
+                if (-not $NoActionButton) {
+                    Write-Output "Adding action button: $ButtonTitle_Safe"
+                    $ActionsXML += "<action arguments=`"$ButtonAction_Safe`" content=`"$ButtonTitle_Safe`" activationType=`"protocol`" />"
+                }
+                else {
+                    Write-Output "Action button suppressed (-NoActionButton switch)"
+                }
             }
 
             # Add Reboot Now button for Stages 0-3 (Stage 4 uses Reboot Now as the only button)
@@ -2311,10 +2363,18 @@ If ($XMLValid -eq $True) {
                 $DismissActionXml = '<action arguments="dismiss" content="Dismiss" activationType="system"/>'
             }
 
+            $ButtonActionXml = ''
+            if (-not $NoActionButton) {
+                $ButtonActionXml = "<action arguments=`"$ButtonAction_Safe`" content=`"$ButtonTitle_Safe`" activationType=`"protocol`" />"
+            }
+            else {
+                Write-Output "Action button suppressed (-NoActionButton switch)"
+            }
+
             [xml]$ActionTemplate = @"
 <toast>
     <actions>
-        <action arguments="$ButtonAction_Safe" content="$ButtonTitle_Safe" activationType="protocol" />
+        $ButtonActionXml
         $DismissActionXml
     </actions>
 </toast>
