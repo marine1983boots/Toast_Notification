@@ -2,7 +2,7 @@
 
 A PowerShell-based enterprise toast notification system for Windows 10/11 with progressive enforcement, designed for SCCM/Intune deployment.
 
-**Current version:** Toast_Notify.ps1 v2.42
+**Current version:** Toast_Notify.ps1 v2.43
 **Production release:** v1.0.0
 
 ---
@@ -237,7 +237,7 @@ The following custom URI protocols are registered during SYSTEM deployment:
 
 | File | Version | Purpose |
 |------|---------|---------|
-| `src/Toast_Notify.ps1` | v2.31 | Main notification script |
+| `src/Toast_Notify.ps1` | v2.43 | Main notification script |
 | `src/Toast_Snooze_Handler.ps1` | v1.11 | Snooze button handler |
 | `src/Toast_Reboot_Handler.ps1` | v1.3 | Reboot button handler |
 | `src/Toast_Dismiss_Handler.ps1` | v1.1 | Dismiss button handler |
@@ -245,7 +245,7 @@ The following custom URI protocols are registered during SYSTEM deployment:
 | `src/BadgeImage_HP.jpg` | - | HP badge image (replace as needed) |
 | `src/HeroImage_BIOS.jpg` | - | HP hero image (replace as needed) |
 | `examples/CustomMessage.xml` | - | Minimal XML template |
-| `docs/TECHNICAL_DOCUMENTATION_TOAST_v3.0.md` | v4.1 | Full ISO 9001 technical documentation |
+| `docs/TECHNICAL_DOCUMENTATION_TOAST_v3.0.md` | v4.6 | Full ISO 9001 technical documentation |
 | `docs/IMAGE_CREATION_GUIDE.md` | - | Image size and format requirements |
 
 ---
@@ -277,16 +277,16 @@ The following custom URI protocols are registered during SYSTEM deployment:
 **Stage not advancing:**
 - Check registry `HKLM:\SOFTWARE\ToastNotification\{GUID}` for `SnoozeCount` value
 - Verify fallback task exists: `Toast_Notification_{GUID}_{Username}_Fallback`
-- See `docs/TECHNICAL_DOCUMENTATION_TOAST_v3.0.md` Section 12.17 for v2.31 fix details
+- See `docs/TECHNICAL_DOCUMENTATION_TOAST_v3.0.md` Section 12.17 for v2.31 fix details or Section 12.26 for v2.43 SCCM re-trigger guard details
 
 ---
 
 ## Documentation
 
 Full ISO 9001/27001 compliant technical documentation:
-`docs/TECHNICAL_DOCUMENTATION_TOAST_v3.0.md` (v4.1)
+`docs/TECHNICAL_DOCUMENTATION_TOAST_v3.0.md` (v4.6)
 
-Includes architecture, function reference, security assessment, code review records, and full changelog from v2.0 through v2.31.
+Includes architecture, function reference, security assessment, code review records, and full changelog from v2.0 through v2.43.
 
 ---
 

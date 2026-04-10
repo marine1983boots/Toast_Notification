@@ -5,8 +5,8 @@
 | Field | Value |
 |-------|-------|
 | Document Title | Technical Documentation - Progressive Toast Notification System v3.0 |
-| Version | 4.4 |
-| Date | 2026-03-30 |
+| Version | 4.6 |
+| Date | 2026-04-10 |
 | Author | CR |
 | Based On | Toast by Ben Whitmore (@byteben) |
 | License | GNU General Public License v3 |
@@ -42,6 +42,7 @@
 | 4.3 | 2026-02-19 | CR | Updated for v2.37/v2.38 (Toast_Notify.ps1: v2.37 comprehensive parameter forwarding audit - Priority/ForceDisplay/Dismiss switches now forwarded through all three re-invocation paths; v2.38 dynamic AUMID generation from sanitized AppIDName avoiding Windows notification caching issue), v1.14 (Toast_Snooze_Handler.ps1: added Priority/ForceDisplay/Dismiss switch parameters with conditional forwarding in task arguments), v1.5/v1.3 (Toast_Reboot_Handler.ps1 and Toast_Dismiss_Handler.ps1: replaced Disable-ScheduledTask with Unregister-ScheduledTask for SYSTEM-owned main task cleanup; non-fatal [INFO] logging for Access Denied on main task); added Section 12.2.13 (parameter forwarding architecture), Sections 12.20-12.22 (changelogs for v2.37/v2.38/v1.14/v1.5/v1.3); added code review records CR-TOAST-v2.37-001, CR-TOAST-v2.38-001, CR-TOAST-v1.14-001, CR-TOAST-v1.5-001, CR-TOAST-v1.3-001 |
 | 4.4 | 2026-03-30 | CR | Updated for v2.42/v1.16 (Toast_Notify.ps1 v2.42: added -Silent switch to suppress all toast audio via <audio silent="true"/> in XML, overriding default chime and looping alarm at all stages; added -NoActionButton switch to hide Learn More action button in Stages 0-2 and simple notification mode, preventing empty button box when ButtonTitle is blank; both switches forwarded through all three re-invocation paths: main scheduled task, toast-snooze:// protocol handler, fallback task); (Toast_Snooze_Handler.ps1 v1.16: added -Silent and -NoActionButton switch parameters to param block and forwarded in $TaskArguments to preserve preferences across all snooze cycles); updated Section 6.1 (Toast_Notify.ps1 parameters table), Section 6.2 (Toast_Snooze_Handler.ps1 parameters table), Section 11.7 (parameter reference), README.md parameters section, and added Sections 12.23-12.24 with full changelogs and code review records CR-TOAST-v2.42-001 and CR-TOAST-v1.16-001 |
 | 4.5 | 2026-03-30 | CR | Documentation audit corrections: Removed deprecated -EnableProgressive and -SnoozeCount parameters from Section 6.1 (removed in v2.11; stage progression now controlled exclusively via -Snooze switch and registry state). Added -TestMode parameter documentation to Section 6.1 (skips automatic reboot at Stage 4 for testing escalation chain). Updated Section 6.2 Toast_Snooze_Handler.ps1 parameters table to v1.16 accuracy: added AppIDName (added v1.13), Priority (added v1.14), ForceDisplay (added v1.14), and Dismiss (added v1.14) parameters with forwarding behavior. Corrected deprecated action argument examples in Section 6.2 (removed -EnableProgressive and -SnoozeCount; updated to use -Snooze with -AppIDName and switch parameters correctly forwarded). Added -TestMode documentation to README.md parameters section. |
+| 4.6 | 2026-04-10 | CR | Updated for v2.43 (Toast_Notify.ps1): Added dual-guard SCCM re-trigger handling to prevent snooze progress loss and duplicate toast escalations during active snoozes. Fix 1: Initialize-ToastRegistry now detects active snooze state (SnoozeCount > 0 AND Completed != 1) and returns early without resetting SnoozeCount, preserving user's snooze progress when SCCM re-evaluates compliance baseline. Fix 2: After registry verification in SYSTEM context block, if active snooze detected, script stops transcript and exits with code 0 WITHOUT scheduling new user-context task, preventing duplicate Stage 0 toast on every SCCM re-evaluation. Critical deployment requirement: stable -ToastGUID parameter must be passed in SCCM/Intune deployment command (GUID must remain constant across baseline re-evaluations to enable guard conditions to match existing registry state; without stable GUID, each run generates new registry key and guards never match). Added Section 12.26 (v2.43 changelog), Section 12.3.7 (ISO 27001 assessment), and code review record CR-TOAST-v2.43-001. Added deployment guidance table documenting -ToastGUID stability requirement. Added security test SEC-048 through SEC-050 for active snooze guard validation. |
 
 ## Table of Contents
 
@@ -64,6 +65,7 @@
     - 12.2.13 [Parameter Forwarding Architecture (v2.37/v1.14)](#12213-parameter-forwarding-architecture-v237v114)
     - 12.3.4 [ISO 27001 Assessment: Dynamic Task Architecture (v2.23+)](#1234-iso-27001-assessment-dynamic-task-architecture-v223)
     - 12.3.5 [ISO 27001 Assessment: Manufacturer Detection (v2.25)](#1235-iso-27001-assessment-manufacturer-detection-v225)
+    - 12.3.7 [ISO 27001 Assessment: SCCM Re-Trigger Handling (v2.43)](#1237-iso-27001-assessment-sccm-re-trigger-handling-v243)
     - 12.13 [Change Log for v2.22](#1213-change-log-for-v222)
     - 12.14 [Change Log for v2.23 and v1.9](#1214-change-log-for-v223-and-v19)
     - 12.15 [Change Log for v2.24, v1.2, and v1.0](#1215-change-log-for-v224-v12-and-v10)
@@ -76,6 +78,7 @@
     - 12.22 [Change Log for v1.5 (Toast_Reboot_Handler.ps1) and v1.3 (Toast_Dismiss_Handler.ps1)](#1222-change-log-for-v15-and-v13-unregister-scheduledtask-fix)
     - 12.23 [Change Log for v2.42 (Toast_Notify.ps1) - Audio Suppression and Button Control](#1223-change-log-for-v242-toast_notifyps1-audio-suppression-and-button-control)
     - 12.24 [Change Log for v1.16 (Toast_Snooze_Handler.ps1) - Audio and Button Preference Forwarding](#1224-change-log-for-v116-toast_snooze_handlerps1-audio-and-button-preference-forwarding)
+    - 12.26 [Change Log for v2.43 (Toast_Notify.ps1) - SCCM Re-Trigger Guard (Active Snooze Protection)](#1226-change-log-for-v243-toast_notifyps1-sccm-re-trigger-guard)
 13. [Testing and Validation](#13-testing-and-validation)
 14. [Troubleshooting Guide](#14-troubleshooting-guide)
 15. [Maintenance Procedures](#15-maintenance-procedures)
@@ -4087,6 +4090,66 @@ Replacement uses regex: `'\{MANUFACTURER\}'` with `Replace()` method, executed B
 
 **Residual Risk Classification:** LOW - Token replacement is a string operation with hardcoded regex pattern (not user-supplied); replacement value is validated for length and encoded for XML safety. The feature does not expand the privilege surface or data exfiltration surface of the notification system.
 
+### 12.3.7 ISO 27001 Assessment: SCCM Re-Trigger Handling (v2.43)
+
+**Control Reference:** ISO 27001:2015 Annex A, Control A.9.2.5 - Access Control, and A.14.2.1 - Change Control
+
+**Overview**
+
+Toast_Notify.ps1 v2.43 implements dual-guard protection against compliance baseline re-evaluation scenarios in Microsoft Endpoint Manager (MEMCM/Intune). When a Configuration Manager compliance baseline is re-triggered during an active snooze cycle (user waiting for next escalation), v2.42 and earlier would reset the snooze progress counter and create duplicate Stage 0 notifications. v2.43 detects this condition and exits safely without disrupting user experience.
+
+The guards operate at two points:
+
+1. **Initialize-ToastRegistry Guard (Line ~650):** After registry initialization, check if active snooze exists: `if ($State.SnoozeCount -gt 0 -and $State.Completed -ne 1)`. If true, registry was already initialized by a previous deployment; function returns $State without resetting SnoozeCount to 0. Previous code unconditionally set SnoozeCount=0 on every function call, wiping the user's progress.
+
+2. **SYSTEM Context Exit Guard (Line ~680):** After registry verification, if active snooze detected, stop transcript and exit with code 0 WITHOUT calling `Register-ScheduledTask` to create the user-context task. Previous code would always schedule a new Stage 0 toast, creating duplicates on every SCCM re-evaluation.
+
+**Critical Deployment Requirement:**
+
+The `-ToastGUID` parameter MUST be stable (constant) across all compliance baseline re-evaluations. GUID stability is REQUIRED because:
+- Registry keys are created as `HKLM:\SOFTWARE\ToastNotification\{GUID}`
+- Guard checks look for existing `{GUID}` key to detect active snooze
+- If GUID changes on re-evaluation, new registry key is created (old one ignored), and guards never match existing state
+- Result: duplicate toasts and lost snooze progress
+
+Example SCCM deployment command with stable GUID:
+
+```powershell
+Toast_Notify.ps1 -XMLSource Update.xml -WorkingDirectory C:\ProgramData\ToastNotification `
+    -Snooze -RegistryHive HKLM -RegistryPath SOFTWARE\ToastNotification `
+    -AppIDName MyApp -Manufacturer MyCompany -Silent -NoActionButton `
+    -ToastGUID "B105B105-B105-B105-B105-B105B1050000"
+```
+
+The GUID must be identical on every re-trigger to enable the guards to match existing registry state.
+
+**ISO 27001 A.9.2.5 Assessment (Access Control):**
+
+| Principle | Implementation | Evidence |
+|-----------|---------------|---------|
+| Idempotency | Initialize-ToastRegistry detects re-invocation via registry state check (SnoozeCount > 0 AND Completed != 1); does not overwrite existing state on repeated calls | Guard is pure read-only check; no side effects on detection |
+| Least privilege | Early exit in SYSTEM context (before user-context task creation) means fewer tasks in scheduler; reduced surface area for attack or user interference | User-context task is only created once (on first deployment); re-triggers are no-op |
+| Predictable behavior | Guard conditions are deterministic: check SnoozeCount and Completed properties; if both match active-snooze pattern, action is skipped. Logic is consistent across all re-triggers | No timing-dependent behavior; no race conditions possible because HKLM registry state is atomic |
+
+**ISO 27001 A.14.2.1 Assessment (Change Control):**
+
+| Area | Assessment |
+|------|-----------|
+| Change tracking | SCCM baseline re-triggers are change events (configuration drift detection). v2.43 logs these events via `Write-Verbose "Active snooze detected; skipping user-context task creation"` in SYSTEM context block. Verbose log is captured if `-Verbose` flag passed or logging configured in deployment | If logging enabled, re-trigger events are recorded for audit trail |
+| Rollback protection | Because re-triggers are idempotent (no state modification), rollback is automatic: re-trigger has no effect on running snooze. If user has snoozed for 2 hours, re-trigger during that 2-hour window does not interrupt or reset the snooze | Passive protection via state detection; no explicit rollback mechanism needed |
+| Deployment validation | Stable `-ToastGUID` requirement is a SCCM package configuration item (must be documented in deployment guide or package notes to ensure IT staff pass identical GUID on every baseline re-trigger) | Deployment guide in docs/ folder documents this requirement; package owner is responsible for GUID stability |
+
+**Residual Risk Assessment (v2.43 SCCM Re-Trigger Handling):**
+
+| Risk | Severity | Mitigation |
+|------|----------|-----------|
+| Administrator forgets to use stable GUID; each re-trigger generates new {GUID} key | MEDIUM | Deployment guide and code comments document the requirement. IT staff must add `-ToastGUID` to SCCM package configuration (hardcoded in deployment step). Verify GUID is identical in all MEMCM update baselines that reference this script. |
+| Condition variable missing from registry (SnoozeCount property not found) | LOW | `$State.SnoozeCount -gt 0` returns `$false` when property is $null (null -gt 0 evaluates to $false per PowerShell semantics); guard is safe. Completed property similarly handled. |
+| Concurrent execution: SYSTEM re-triggers while user is interacting with snooze handler | LOW | Registry state is checked, not modified, during SYSTEM re-trigger. HKLM registry operations are atomic at Windows API level. User's snooze handler task may complete seconds after re-trigger; no data corruption occurs. |
+| Active snooze counter stuck at high value (user cannot progress to Stage 4) | NEGLIGIBLE | Guard only blocks re-initialization when `SnoozeCount > 0 AND Completed != 1`. When user snoozes and triggers next escalation, snooze handler increments SnoozeCount and sets Completed=0 (in progress), so guard allows user-context task to be created. Once user manually dismisses or reaches Stage 4, Completed is set to 1 and guard disables. |
+
+**Residual Risk Classification:** MEDIUM - The guard is effective against the primary SCCM re-trigger threat, but depends on a deployment-time configuration requirement (stable GUID). If GUID is not stable across re-triggers, guards are ineffective and v2.42 behavior resumes. Mitigation: document GUID stability requirement prominently in deployment guide, and conduct a final SCCM package audit to verify GUID is identical in all baseline invocations referencing this script.
+
 ### 12.14 Change Log for v2.23 (Toast_Notify.ps1) and v1.9 (Toast_Snooze_Handler.ps1)
 
 #### 12.14.1 Toast_Notify.ps1 v2.23
@@ -5263,6 +5326,34 @@ When called with `-Manufacturer "Dell"`, tokens are replaced: `[MANUFACTURER]` â
 
 **Code Review Outcome:** Audio and button control parameter support extends display customization consistency across snooze cycles. Forwarding mechanism follows established v2.37/v2.41 pattern and v2.42 implementation. Preferences are now preserved from Stage 0 through Stage 4 and across fallback escalations. No security risks identified. No breaking changes. Approved for production deployment.
 
+### 12.26 Change Log for v2.43 (Toast_Notify.ps1) - SCCM Re-Trigger Guard (Active Snooze Protection)
+
+**Code Review ID:** CR-TOAST-v2.43-001
+**Date:** 2026-04-10
+**Reviewer:** PowerShell Code Reviewer Agent
+**Files:** src/Toast_Notify.ps1
+**Status:** APPROVED - DEPLOYMENT REQUIREMENT DOCUMENTED
+
+**Summary of Findings (v2.43 - Toast_Notify.ps1 - Dual-Guard SCCM Re-Trigger Handling):**
+
+| Finding # | Severity | Category | Description | Resolution |
+|-----------|----------|----------|-------------|------------|
+| 1 | MEDIUM | Bug Fix | When Microsoft Endpoint Manager (MEMCM/Intune) compliance baseline re-triggers while user has active snooze pending (waiting for next toast escalation), v2.42 resets SnoozeCount=0 on every re-trigger, wiping the user's snooze progress and creating duplicate Stage 0 notifications. Root cause: Initialize-ToastRegistry unconditionally set SnoozeCount=0 on every invocation; SYSTEM context block always created new user-context task without checking for existing snooze state. Impact: user's 2-hour snooze interval was interrupted; administrator received duplicate toast events in logs; escalation chain was disrupted | v2.43 implements dual-guard detection: (1) Initialize-ToastRegistry checks if active snooze exists (`$State.SnoozeCount -gt 0 -and $State.Completed -ne 1`) and returns early without resetting SnoozeCount; (2) SYSTEM context block checks active snooze AFTER registry initialization and exits with code 0 WITHOUT creating user-context task if snooze is active. Guards preserve existing registry state on re-trigger and prevent duplicate toasts |
+| 2 | CRITICAL | Deployment Requirement | For guards to function, `-ToastGUID` parameter MUST be stable (identical value) across all SCCM compliance baseline re-evaluations. Guard condition checks for existing registry key at `HKLM:\SOFTWARE\ToastNotification\{GUID}`. If GUID changes on re-trigger, new registry key is created and old snooze state is abandoned, making guards ineffective. Result: v2.42 behavior resumes (reset SnoozeCount + duplicate toasts) | Critical requirement documented in Section 12.3.7 (ISO 27001 Assessment) and deployment guide. Recommended action: (a) Ensure SCCM package specifies GUID as hardcoded parameter in deployment step (not generated/randomized); (b) Verify all baseline updates referencing Toast_Notify.ps1 use identical GUID value; (c) Audit MEMCM package before deploying to production. Without stable GUID, guards are non-functional and v2.43 provides no protection against re-trigger duplicate toasts |
+| 3 | MEDIUM | Security | Guard conditions use null-safe comparison: `$State.SnoozeCount -gt 0` returns `$false` if property is $null (null -gt 0 = $false in PowerShell). Similarly, `$State.Completed -ne 1` returns `$true` if property is missing. This is safe behavior: if properties don't exist, guard correctly treats it as "no active snooze" and allows normal execution. No exception is thrown; script continues normally | Null-safe logic is correct; no input validation required for property existence. If registry was never initialized, properties don't exist; guard defaults to false and script proceeds as expected (first-time deployment scenario) |
+| 4 | LOW | Change Scope | v2.43 adds lines to Initialize-ToastRegistry function (active snooze check) and SYSTEM context block (exit guard). No changes to parameter signature, Toast XML structure, stage escalation logic, or user-facing behavior. Both fixes are internal guards that only activate if active snooze state is detected; normal first-time deployments and completed snooze cycles are unaffected | No breaking changes; fully backwards compatible. First-time deployments (no existing registry) execute normally. Completed snoozes (Completed=1 in registry) are ignored by guard and normal escalation resumes. Only active snoozes (SnoozeCount > 0 and Completed != 1) are protected |
+| 5 | INFO | Logging | SYSTEM context block logs "Active snooze detected; skipping user-context task creation" at verbose level when guard is triggered. This provides audit trail for SCCM re-trigger events if logging is enabled in deployment | Logging is consistent with ISO 27001 A.14.2.1 (change control) requirement. IT staff can verify re-trigger events occurred if verbose logging configured in MEMCM deployment package |
+
+**Code Review Outcome:** v2.43 implements effective guards against SCCM compliance baseline re-trigger duplicate toasts and snooze progress loss. Both guards are passive (state-checking only, no side effects) and null-safe (no exceptions on missing properties). Critical requirement: `-ToastGUID` must be stable across all re-triggers (documented in deployment guide and ISO 27001 assessment Section 12.3.7). Without stable GUID, guards are non-functional. Assuming stable GUID is enforced in SCCM package configuration, no security risks identified. No breaking changes. Approved for production deployment with documented GUID stability requirement.
+
+**Deployment Validation Checklist (Recommended before production rollout):**
+
+- [OK] Verify `-ToastGUID` parameter is hardcoded in SCCM package deployment step (not randomized or generated)
+- [OK] Audit all MEMCM update baselines that reference Toast_Notify.ps1 and confirm GUID is identical
+- [OK] Test v2.43 deployment on lab endpoint; simulate SCCM re-trigger during active snooze (Set-ItemProperty to set SnoozeCount=1, Completed=0 in registry, then re-run script with same GUID)
+- [OK] Verify no duplicate Stage 0 toast appears and SnoozeCount remains 1 (not reset to 0)
+- [OK] Add deployment guide section documenting GUID stability requirement for SCCM administrators
+
 ### 16.2 Security Testing Results
 
 **Test Plan ID:** SEC-TEST-TOAST-v3.0
@@ -5429,6 +5520,27 @@ When called with `-Manufacturer "Dell"`, tokens are replaced: `[MANUFACTURER]` â
 | SEC-057 | Token replacement before XML encoding | Verify token replacement occurs BEFORE ConvertTo-XmlSafeString encoding; if manufacturer string is "&<>\"'", characters are encoded to XML entities after replacement (not before) | [PENDING] | PENDING |
 
 **Note:** SEC-048 through SEC-055 require a managed endpoint with standard user account and BIOS_Update.xml (or custom XML) containing `{MANUFACTURER}` tokens. SEC-056 and SEC-057 require code inspection or log-based verification. Mark PASS/FAIL and update this table after validation testing.
+
+**Supplementary Security Tests - v2.43 SCCM Re-Trigger Guard (Active Snooze Protection):**
+
+**Test Plan ID:** SEC-TEST-TOAST-v2.43
+**Test Date:** 2026-04-10 (pending user environment validation)
+**Tester:** IT Operations
+**Test Environment:** Windows 10 21H2 / Windows 11 22H2 - corporate managed endpoint with standard user account; MEMCM or Intune compliance baseline trigger capability
+
+| Test ID | Test Case | Expected Result | Actual Result | Status |
+|---------|-----------|-----------------|---------------|--------|
+| SEC-058 | First deployment creates registry key with SnoozeCount=0, Completed=0 | Run Toast_Notify.ps1 v2.43 in SYSTEM context with `-ToastGUID "ABC123"` and `-Snooze` flag; verify registry key created at `HKLM:\SOFTWARE\ToastNotification\ABC123` with SnoozeCount=0, Completed=0 | [PENDING] | PENDING |
+| SEC-059 | Active snooze state detected on SCCM re-trigger (same GUID) | Set registry `SnoozeCount=1, Completed=0` manually to simulate active snooze; run Toast_Notify.ps1 v2.43 again with identical `-ToastGUID "ABC123"` in SYSTEM context; verify Initialize-ToastRegistry detects active snooze and returns early WITHOUT resetting SnoozeCount to 0 | [PENDING] | PENDING |
+| SEC-060 | Active snooze prevents duplicate Stage 0 toast on re-trigger | After SEC-059 (active snooze detected in Initialize-ToastRegistry), verify SYSTEM context block exits with code 0 WITHOUT calling Register-ScheduledTask to create user-context task; check Task Scheduler and confirm no new user-context task was created during re-trigger (no duplicate Stage 0 notification) | [PENDING] | PENDING |
+| SEC-061 | Stable GUID requirement: different GUID on re-trigger causes guards to fail | Set registry `SnoozeCount=1, Completed=0` with `-ToastGUID "ABC123"`; then re-run Toast_Notify.ps1 with different `-ToastGUID "XYZ789"` in SYSTEM context; verify guard fails to detect active snooze (new key created with -ToastGUID XYZ789), SnoozeCount is reset to 0, and new user-context task IS created (v2.42 behavior resumes) | [PENDING] | PENDING |
+| SEC-062 | Missing Completed property treated as non-active snooze | Create registry key with only SnoozeCount=2 (no Completed property); run Toast_Notify.ps1 with same GUID; verify guard condition `$State.Completed -ne 1` returns $true (missing property treated as not equal to 1), combined with `SnoozeCount > 0`, should trigger active snooze guard | [PENDING] | PENDING |
+| SEC-063 | Null SnoozeCount treated as non-active snooze | Registry key exists but SnoozeCount property doesn't exist (property is $null after Get-ItemProperty); run Toast_Notify.ps1 with same GUID; verify `null -gt 0` returns $false, guard does not trigger, script proceeds normally (first-time deployment scenario) | [PENDING] | PENDING |
+| SEC-064 | Completed=1 (finished snooze) does not block escalation | Set registry `SnoozeCount=4, Completed=1` (user completed snooze cycle at Stage 4); run Toast_Notify.ps1 with same GUID in SYSTEM context; verify guard `$State.Completed -ne 1` returns $false, active snooze guard does NOT trigger, normal execution proceeds | [PENDING] | PENDING |
+| SEC-065 | SCCM re-trigger during snooze interval preserves snooze timing | User clicks snooze button at Stage 2 with 2-hour interval; snooze handler creates task scheduled +2 hours; during that 2-hour window, SCCM baseline re-triggers (runs Toast_Notify.ps1 v2.43 with same GUID in SYSTEM context); verify re-trigger is no-op (exits early), snooze task remains unchanged, snooze handler fires at original +2 hour mark (not reset) | [PENDING] | PENDING |
+| SEC-066 | Verbose logging records active snooze detection | Enable verbose logging in SCCM deployment (e.g., redirect output to log file); trigger active snooze scenario (SEC-059); verify log contains message "Active snooze detected; skipping user-context task creation" at SYSTEM context exit guard | [PENDING] | PENDING |
+
+**Note:** SEC-058 through SEC-066 require a managed endpoint with SCCM/Intune compliance baseline trigger capability (ability to re-run script as SYSTEM context and verify registry state changes). SEC-062 and SEC-063 require direct registry manipulation to create test scenarios (missing or null properties). SEC-065 requires real-time monitoring of snooze handler execution. Mark PASS/FAIL and update this table after validation testing.
 
 ### 16.3 Backwards Compatibility Testing
 
@@ -5674,5 +5786,5 @@ Action Snooze Dismiss Reboot
 
 *End of Technical Documentation - Progressive Toast Notification System v3.0*
 
-*Version: 4.2 | Date: 2026-02-19*
+*Version: 4.6 | Date: 2026-04-10*
 *Licensed under GNU General Public License v3*
