@@ -5,6 +5,14 @@ Created by:   Ben Whitmore
 Filename:     Toast_Notify.ps1
 ===========================================================================
 
+Version 2.43 - 10/04/2026
+-FIX: SCCM baseline re-trigger during active snooze now handled correctly
+-Initialize-ToastRegistry returns early (preserves SnoozeCount) if active snooze detected
+ (previously reset SnoozeCount=0 unconditionally, wiping snooze progress on every re-evaluation)
+-SYSTEM context exits without re-scheduling user task if active snooze is in progress
+ (previously fired a duplicate Stage 0 toast immediately on every SCCM re-evaluation)
+-Requires stable -ToastGUID parameter in SCCM deployment for fix to apply correctly
+
 Version 2.42 - 30/03/2026
 -Added -Silent switch: suppresses all toast audio by setting <audio silent="true"/> in the toast XML.
  Overrides default notification chime and looping alarm at all stages.
@@ -626,6 +634,13 @@ function Initialize-ToastRegistry {
         if (!(Test-Path $RegPath)) {
             New-Item -Path $BasePath -Name $ToastGUID -Force | Out-Null
             Write-Verbose "Registry path created: $RegPath"
+        }
+
+        # Preserve active snooze state - skip reset if re-triggered during active snooze
+        $ExistingState = Get-ItemProperty -Path $RegPath -ErrorAction SilentlyContinue
+        if ($ExistingState -and $ExistingState.SnoozeCount -gt 0 -and $ExistingState.Completed -ne 1) {
+            Write-Output "[OK] Active snooze detected (SnoozeCount=$($ExistingState.SnoozeCount)) - preserving state, skipping reset"
+            return $true
         }
 
         # Initialize properties with write verification
@@ -1622,6 +1637,15 @@ If ($XMLValid -eq $True) {
             }
 
             Write-Output "Registry initialization verified: SnoozeCount=$($RegVerify.SnoozeCount)"
+
+            # Skip task re-scheduling if an active snooze is already pending
+            # Prevents duplicate toasts when SCCM re-evaluates the baseline mid-snooze
+            if ($RegVerify.SnoozeCount -gt 0 -and $RegVerify.Completed -ne 1) {
+                Write-Output "[OK] Active snooze in progress (Stage $($RegVerify.SnoozeCount)) - skipping task re-schedule"
+                Write-Output "     Existing snooze task will fire at its scheduled time. No new task created."
+                Stop-Transcript
+                exit 0
+            }
 
             # Store XMLSource and ToastScenario in registry for snooze handler to read.
             # Snooze handler (v1.9) creates task action arguments dynamically using these values.
