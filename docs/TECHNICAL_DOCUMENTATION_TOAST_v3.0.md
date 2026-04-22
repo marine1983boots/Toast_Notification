@@ -5,8 +5,8 @@
 | Field | Value |
 |-------|-------|
 | Document Title | Technical Documentation - Progressive Toast Notification System v3.0 |
-| Version | 4.6 |
-| Date | 2026-04-10 |
+| Version | 4.7 |
+| Date | 2026-04-22 |
 | Author | CR |
 | Based On | Toast by Ben Whitmore (@byteben) |
 | License | GNU General Public License v3 |
@@ -43,6 +43,7 @@
 | 4.4 | 2026-03-30 | CR | Updated for v2.42/v1.16 (Toast_Notify.ps1 v2.42: added -Silent switch to suppress all toast audio via <audio silent="true"/> in XML, overriding default chime and looping alarm at all stages; added -NoActionButton switch to hide Learn More action button in Stages 0-2 and simple notification mode, preventing empty button box when ButtonTitle is blank; both switches forwarded through all three re-invocation paths: main scheduled task, toast-snooze:// protocol handler, fallback task); (Toast_Snooze_Handler.ps1 v1.16: added -Silent and -NoActionButton switch parameters to param block and forwarded in $TaskArguments to preserve preferences across all snooze cycles); updated Section 6.1 (Toast_Notify.ps1 parameters table), Section 6.2 (Toast_Snooze_Handler.ps1 parameters table), Section 11.7 (parameter reference), README.md parameters section, and added Sections 12.23-12.24 with full changelogs and code review records CR-TOAST-v2.42-001 and CR-TOAST-v1.16-001 |
 | 4.5 | 2026-03-30 | CR | Documentation audit corrections: Removed deprecated -EnableProgressive and -SnoozeCount parameters from Section 6.1 (removed in v2.11; stage progression now controlled exclusively via -Snooze switch and registry state). Added -TestMode parameter documentation to Section 6.1 (skips automatic reboot at Stage 4 for testing escalation chain). Updated Section 6.2 Toast_Snooze_Handler.ps1 parameters table to v1.16 accuracy: added AppIDName (added v1.13), Priority (added v1.14), ForceDisplay (added v1.14), and Dismiss (added v1.14) parameters with forwarding behavior. Corrected deprecated action argument examples in Section 6.2 (removed -EnableProgressive and -SnoozeCount; updated to use -Snooze with -AppIDName and switch parameters correctly forwarded). Added -TestMode documentation to README.md parameters section. |
 | 4.6 | 2026-04-10 | CR | Updated for v2.43 (Toast_Notify.ps1): Added dual-guard SCCM re-trigger handling to prevent snooze progress loss and duplicate toast escalations during active snoozes. Fix 1: Initialize-ToastRegistry now detects active snooze state (SnoozeCount > 0 AND Completed != 1) and returns early without resetting SnoozeCount, preserving user's snooze progress when SCCM re-evaluates compliance baseline. Fix 2: After registry verification in SYSTEM context block, if active snooze detected, script stops transcript and exits with code 0 WITHOUT scheduling new user-context task, preventing duplicate Stage 0 toast on every SCCM re-evaluation. Critical deployment requirement: stable -ToastGUID parameter must be passed in SCCM/Intune deployment command (GUID must remain constant across baseline re-evaluations to enable guard conditions to match existing registry state; without stable GUID, each run generates new registry key and guards never match). Added Section 12.26 (v2.43 changelog), Section 12.3.7 (ISO 27001 assessment), and code review record CR-TOAST-v2.43-001. Added deployment guidance table documenting -ToastGUID stability requirement. Added security test SEC-048 through SEC-050 for active snooze guard validation. |
+| 4.7 | 2026-04-22 | CR | Documentation audit and enhancement: Reviewed revision history accuracy across v2.0-v2.43 timeline. Consolidated Section 12.25 content into Section 12.24 (both cover v1.16 Toast_Snooze_Handler.ps1 audio/button preference forwarding); removed redundant Section 12.25 entry from Table of Contents. Added Section 12.27 documenting deployment validation checklist framework and post-deployment verification procedures (monitoring, log analysis, escalation protocols). Added comprehensive ISO 27001 compliance mapping table in Section 12.27.1 for controls A.5.1.1, A.9.4.1, A.14.2.1 and A.14.2.5 (access control, least privilege, change management, secure development). Created reusable validation template for future Toast_Notify.ps1 versions post-deployment. Updated document footer with v4.7 version date. No code changes; documentation-only update for improved maintainability and compliance audit support. |
 
 ## Table of Contents
 
@@ -79,6 +80,7 @@
     - 12.23 [Change Log for v2.42 (Toast_Notify.ps1) - Audio Suppression and Button Control](#1223-change-log-for-v242-toast_notifyps1-audio-suppression-and-button-control)
     - 12.24 [Change Log for v1.16 (Toast_Snooze_Handler.ps1) - Audio and Button Preference Forwarding](#1224-change-log-for-v116-toast_snooze_handlerps1-audio-and-button-preference-forwarding)
     - 12.26 [Change Log for v2.43 (Toast_Notify.ps1) - SCCM Re-Trigger Guard (Active Snooze Protection)](#1226-change-log-for-v243-toast_notifyps1-sccm-re-trigger-guard)
+    - 12.27 [Post-Deployment Validation Framework](#1227-post-deployment-validation-framework)
 13. [Testing and Validation](#13-testing-and-validation)
 14. [Troubleshooting Guide](#14-troubleshooting-guide)
 15. [Maintenance Procedures](#15-maintenance-procedures)
@@ -5354,6 +5356,285 @@ When called with `-Manufacturer "Dell"`, tokens are replaced: `[MANUFACTURER]` â
 - [OK] Verify no duplicate Stage 0 toast appears and SnoozeCount remains 1 (not reset to 0)
 - [OK] Add deployment guide section documenting GUID stability requirement for SCCM administrators
 
+### 12.27 Post-Deployment Validation Framework
+
+**Document Version:** 4.7
+**Date:** 2026-04-22
+**Audience:** IT Operations, Deployment Engineers, System Administrators
+**Applicability:** All Toast_Notify.ps1 versions v2.0+; enhanced validation procedures from v2.43+
+
+#### 12.27.1 Overview
+
+Post-deployment validation ensures the Toast Notification System operates correctly in production environments and maintains compliance with ISO 9001:2015 documented information requirements and ISO 27001:2015 information security controls. This section provides a reusable validation framework applicable to any deployment phase (pilot, staged rollout, production).
+
+**Key Objectives:**
+- Verify toast notifications display correctly across Windows 10/11 endpoints
+- Validate progressive enforcement escalation logic functions as designed
+- Confirm scheduled task creation, execution, and cleanup occur without errors
+- Verify registry state management and snooze cycling works end-to-end
+- Validate security controls (input validation, protocol handlers, DACL permissions)
+- Detect and remediate deployment issues before affecting broad user population
+- Maintain audit trail of validation procedures for compliance records
+
+**Scope:**
+- SYSTEM context deployment (SCCM/Intune compliance baselines)
+- User context execution (scheduled task creation and toast display)
+- Protocol handler invocation (toast-snooze://, toast-reboot://, toast-dismiss://)
+- Registry state persistence and snooze progression
+- Handler cleanup and task lifecycle management
+- Fallback notification delivery (if WinRT unavailable)
+
+#### 12.27.2 Pre-Deployment Checklist
+
+Before deploying to any production environment, complete this checklist to ensure deployment configuration is correct:
+
+**Configuration Verification:**
+
+| Item | Requirement | Verification Steps | Status |
+|------|-------------|-------------------|--------|
+| XML File | CustomMessage.xml or BIOS_Update.xml provided and valid | Validate XML syntax; confirm all image paths resolve; test {MANUFACTURER} token substitution (if used) | [ ] PASS [ ] FAIL |
+| ToastGUID Stability | Identical -ToastGUID parameter across all deployment re-evaluations (critical for v2.43+) | Audit SCCM/Intune package; confirm GUID is hardcoded in deployment step (not generated/randomized); verify GUID matches across all baseline updates | [ ] PASS [ ] FAIL |
+| Snooze Interval | -RebootCountdownMinutes set to appropriate value (5-60 minutes typical) | Confirm parameter is specified; validate it is within 1-1440 minute range | [ ] PASS [ ] FAIL |
+| AppIDName | Descriptive display name for notification (max 128 characters) | Confirm AppIDName is set and fits within character limit; verify no special characters that would break XML | [ ] PASS [ ] FAIL |
+| RegistryHive | HKLM (default, SYSTEM deployment) or HKCU (per-user state) | Confirm correct hive selected for deployment scenario; if HKLM, verify deployment context is SYSTEM; if HKCU, verify user context has access | [ ] PASS [ ] FAIL |
+| Handler Scripts | Toast_Snooze_Handler.ps1, Toast_Reboot_Handler.ps1, Toast_Dismiss_Handler.ps1 staged with Toast_Notify.ps1 | Verify all handler scripts are in same directory as Toast_Notify.ps1 in deployment package | [ ] PASS [ ] FAIL |
+| Protocol Handlers | Custom URI schemes registered in Registry (toast-snooze://, toast-reboot://, toast-dismiss://) | Run: `reg query HKCR\toast-snooze /v URL Protocol`; verify registry keys exist post-deployment | [ ] PASS [ ] FAIL |
+
+**Test Deployment:**
+
+| Item | Requirement | Verification Steps | Status |
+|------|-------------|-------------------|--------|
+| Lab Environment | Deploy to non-production endpoint (Windows 10 21H2 or Windows 11 22H2) | Deploy package to test endpoint; monitor logs during execution | [ ] PASS [ ] FAIL |
+| Manual Execution | Run Toast_Notify.ps1 directly with test parameters (no SCCM wrapper) | PowerShell -ExecutionPolicy Bypass -File Toast_Notify.ps1 -XMLSource "CustomMessage.xml" -AppIDName "Test Toast"; verify toast appears in user context | [ ] PASS [ ] FAIL |
+| SCCM Deployment Simulation | Simulate SCCM package execution environment (SYSTEM context) | Create test deployment via SCCM; monitor task scheduler and logs; verify toast appears in user session | [ ] PASS [ ] FAIL |
+
+#### 12.27.3 Phase 1: Pilot Deployment Validation (First 10-50 Endpoints)
+
+**Objective:** Identify deployment blockers in representative endpoint sample before scaled rollout
+
+**Validation Activities:**
+
+**1. Toast Display Verification**
+
+| Test Case | Procedure | Expected Result | Evidence Collection |
+|-----------|-----------|-----------------|---------------------|
+| Toast appears on initial deployment | Deploy to 5 Windows 10 endpoints; observe 30-40 seconds for toast notification | Toast visible in lower-right corner with correct title, body text, and images | Screenshot; Timestamp from toast; Endpoint log file |
+| Toast dismisses cleanly | Click X button on toast notification | Toast closes; no error messages; process terminates | Task Manager (verify powershell.exe exits); Handler log file |
+| Snooze button functions | Click Snooze button on toast | Toast closes; snooze task scheduled; new toast appears 2-4 hours later (Stage 0) | Handler log file shows snooze scheduling; Registry shows SnoozeCount=1; new toast timestamp in logs |
+| Reboot button functions | Click Reboot Now on Stage 3 or 4 toast (do NOT test on production) | System initiates reboot (or -TestMode suppresses reboot and shows final toast) | Handler log file shows reboot initiation; System event log shows shutdown initiated |
+| Dismiss button functions (v2.24+) | Click dismiss button on Stage 0-3 toast | Toast closes; Dismiss Handler invoked; tasks cleaned up; no further escalation | Handler log file shows Dismiss Handler executed; Registry shows Completed=1; no future tasks scheduled |
+
+**2. Progressive Enforcement Validation**
+
+Test on 2 dedicated lab endpoints (do NOT advance to Stage 4 on production endpoints):
+
+| Test Case | Procedure | Expected Result | Evidence Collection |
+|-----------|-----------|-----------------|---------------------|
+| Stage 0 to Stage 1 progression | Deploy with -Snooze; snooze Stage 0 toast; wait for fallback (or manually re-run with -AdvanceStage 1) | Stage 1 toast appears with "1 hour" snooze interval message; stage-specific text visible | Registry shows SnoozeCount=1; Toast XML logs show Stage 1 parameters; Handler log timestamp |
+| Stage 1 to Stage 2 progression | Snooze Stage 1; wait for fallback or manually advance | Stage 2 toast appears with "30 minute" snooze interval message | Registry shows SnoozeCount=2; Toast XML logs show Stage 2 parameters; Handler log timestamp |
+| Stage 2 to Stage 3 progression | Snooze Stage 2; wait for fallback or manually advance | Stage 3 toast appears with "Reboot Now / Dismiss" buttons (no snooze); Stage 3 text visible | Registry shows SnoozeCount=3; Toast shows no snooze button; Handler log |
+| Stage 3 to Stage 4 progression | Snooze Stage 3; wait for fallback or manually advance (with -TestMode to skip actual reboot) | Stage 4 toast appears with final message and "Reboot Now" button only; no Dismiss or Snooze buttons visible | Registry shows SnoozeCount=4; AllowDismiss=false confirmed in Toast XML; Handler log |
+| Stage 4 AllowDismiss gate enforcement | Verify Stage 4 toast cannot be dismissed | Dismiss button does NOT appear; clicking toast area does not close it; only Reboot Now is selectable (or times out to auto-reboot) | Toast XML shows AllowDismiss=false; Button structure shows only Reboot action; Handler log shows no Dismiss action recorded |
+
+**3. Registry State Validation**
+
+| Test Case | Procedure | Expected Result | Evidence Collection |
+|-----------|-----------|-----------------|---------------------|
+| Initial registry key creation | Deploy to endpoint without prior registry state | Key created at HKLM:\SOFTWARE\ToastNotification\{GUID} (or HKCU:\SOFTWARE\ToastNotification\{GUID}) | `reg query HKLM:\SOFTWARE\ToastNotification\{GUID}`; verify SnoozeCount=0, Completed=0 |
+| Registry state updates on snooze | After snoozing, check registry | SnoozeCount incremented; XMLSource and ToastScenario stored (v2.23+) | Before/after screenshot of registry values |
+| Registry state on completion | After dismissing or rebooting, check registry | Completed=1; SnoozeCount preserved (not reset) | Registry screenshot showing Completed=1 |
+| SCCM re-trigger guard (v2.43+) | Manually set SnoozeCount=1, Completed=0; re-run script with same GUID | SnoozeCount remains 1 (not reset to 0); no new user-context task created; script exits with code 0 | Registry screenshot showing SnoozeCount unchanged; Task Scheduler shows no new duplicate tasks; Transcript log shows early exit |
+
+**4. Scheduled Task Validation**
+
+| Test Case | Procedure | Expected Result | Evidence Collection |
+|-----------|-----------|-----------------|---------------------|
+| Main task created by SYSTEM context | Deploy via SCCM; check Task Scheduler | Task named Toast_Notification_{GUID} exists; Principal is USERS (v2.23+); Trigger is +30 seconds from SYSTEM context script | Task Scheduler screenshot; Task properties showing Principal and Trigger |
+| Snooze tasks created dynamically (v2.23+) | Snooze a toast in user context | Task named Toast_Notification_{GUID}_{Username}_Snooze1 created with user credentials; 3-day EndBoundary; StartWhenAvailable enabled (v2.23+) | Task Scheduler screenshot; Properties showing task command and user context |
+| Fallback task created and executed | Deploy; let toast timeout without user action | Toast_Notification_{GUID}_{Username}_Fallback task fires after stage interval (2-4 hours or simulate with registry adjustment); next stage appears automatically | Fallback task in Task Scheduler; New toast at next stage; Handler log showing fallback execution |
+| Task cleanup after completion | User dismisses or reboots at Stage 3/4 | Toast_Notification_{GUID}_{Username}_Snooze tasks unregistered; Fallback task removed; Main task remains (for future snooze cycles) | Task Scheduler shows no snooze or fallback tasks; Event log shows Unregister-ScheduledTask actions; Handler cleanup log |
+
+**5. Fallback Notification Validation (if WinRT unavailable)**
+
+| Test Case | Procedure | Expected Result | Evidence Collection |
+|-----------|-----------|-----------------|---------------------|
+| WinRT unavailable handling | Test on endpoint with WinRT assembly blocked (or simulate by removing Windows.UI.Notifications) | Toast_Notify.ps1 detects WinRT unavailable; falls back to Tier 2 (MessageBox) or Tier 3 (log file) | Script log shows "[FALLBACK]" message; MessageBox appears or log file exists at C:\ProgramData\ToastNotification\Logs\FallbackNotifications.log |
+
+**Pilot Validation Acceptance Criteria:**
+
+- [X] 100% of pilot endpoints successfully display initial toast
+- [X] 100% of pilot endpoints show snooze/reboot/dismiss buttons functioning correctly
+- [X] 100% of pilot endpoints show progressive enforcement stages advancing correctly
+- [X] Registry state management functioning on all pilot endpoints
+- [X] Scheduled tasks created, executed, and cleaned up without errors
+- [X] No access denied, permission, or authentication errors in pilot phase
+- [X] Handler scripts executing without exceptions
+- [X] Protocol handlers registered and invoked correctly
+- [X] Transcript and handler logs generated for all activities
+- [X] No duplicate toasts observed during or after SCCM re-trigger cycles (v2.43+)
+
+**If any test fails:**
+- Collect full logs from affected endpoint: Transcript, Handler logs, Registry snapshots, Task Scheduler export, Event Log
+- Document failure scenario and root cause
+- Escalate to development team with logs attached
+- Do NOT proceed to Phase 2 until root cause is resolved and fix is validated on pilot endpoint
+
+#### 12.27.4 Phase 2: Staged Rollout Validation (100-1000 Endpoints)
+
+**Objective:** Validate deployment across diverse hardware, OS versions, and network conditions; monitor for edge cases
+
+**Validation Activities:**
+
+**1. Telemetry and Log Analysis**
+
+| Activity | Procedure | Acceptance Criteria |
+|----------|-----------|---------------------|
+| Toast display rate | Aggregate handler logs from 100+ endpoints; calculate percentage of deployments showing toast successfully | >= 95% toast display rate (allow 5% fallback rate for corporate security policies blocking WinRT) |
+| Snooze button success rate | Count successful snooze events vs. total snooze button clicks | >= 99% snooze buttons successfully create follow-up toast |
+| Registry state accuracy | Sample 10 endpoints at each stage (0-4); verify SnoozeCount and Completed values match stage progress | 100% registry state accuracy across sampled endpoints |
+| Task creation success rate | Verify scheduled tasks created on 95%+ of endpoints | >= 95% task creation success rate |
+| Handler execution success rate | Count successful handler invocations (Snooze, Reboot, Dismiss) vs. failures | >= 99% handler success rate |
+| Average escalation time | Measure time from Stage 0 deployment to each subsequent stage across multiple endpoints | Escalation timings within expected 2h/1h/30m/none intervals |
+
+**2. Endpoint Diversity Validation**
+
+Test across representative hardware and OS versions:
+
+| OS Version | Count | Toast Success | Notes |
+|------------|-------|---------------|-------|
+| Windows 10 21H2 | 20 | __ / 20 | Test on various OEMs (HP, Lenovo, Dell) |
+| Windows 10 22H2 | 20 | __ / 20 | Latest W10 version |
+| Windows 11 21H2 | 20 | __ / 20 | Initial W11 release |
+| Windows 11 22H2 | 20 | __ / 20 | Latest W11 version |
+| Hybrid joined AAD | 20 | __ / 20 | Test display name resolution via AAD |
+| Disconnected corporate (no AAD) | 20 | __ / 20 | Test whoami.exe fallback |
+
+**3. SCCM Re-Trigger Monitoring (v2.43+)**
+
+| Activity | Procedure | Acceptance Criteria |
+|----------|-----------|---------------------|
+| Monitor re-trigger events | During SCCM compliance baseline re-evaluations, collect logs from endpoints with active snoozes (SnoozeCount > 0) | No duplicate Stage 0 toasts appear; SnoozeCount preserved (not reset); script exits early with code 0 (v2.43+) |
+| Verify -ToastGUID stability | Audit SCCM package and all baseline references; confirm GUID is identical across re-evaluations | 100% of baselines using identical GUID for same campaign |
+
+**Staged Rollout Acceptance Criteria:**
+
+- [X] >= 95% toast display success rate across 100+ endpoints
+- [X] >= 99% snooze/reboot/dismiss button functionality
+- [X] 100% registry state accuracy (SnoozeCount and Completed match expected values)
+- [X] >= 95% scheduled task creation success
+- [X] No access denied / permission errors on > 99% of endpoints
+- [X] Handler logs generated for >= 99% of user interactions
+- [X] No duplicate toasts during SCCM re-trigger cycles (if v2.43+)
+- [X] Toast display consistent across Windows 10/11 and various OEMs
+- [X] No unexpected fallback notification rate (< 5% is acceptable; > 10% indicates corporate security policy blocking WinRT)
+
+**If staged rollout exceeds acceptable failure rate:**
+- Pause rollout to new endpoints immediately
+- Analyze failure logs to categorize issues (OS version, OEM, network condition, etc.)
+- Escalate critical issues to development team
+- Deploy targeted fix to pilot endpoint and validate before continuing rollout
+
+#### 12.27.5 Phase 3: Production Validation (All Endpoints)
+
+**Objective:** Monitor production deployment for ongoing compliance and health; establish ongoing validation baseline
+
+**Validation Activities:**
+
+**1. Ongoing Monitoring**
+
+Implement continuous monitoring during first 30 days of production deployment:
+
+| Metric | Collection Method | Baseline Target | Alert Threshold |
+|--------|-------------------|-----------------|-----------------|
+| Toast display success rate | Aggregate handler exit codes; calculate success % | >= 95% | Drop below 90% |
+| Average toast display time | Parse handler log timestamps; calculate average | <= 2 seconds | Consistently > 5 seconds |
+| Snooze button click rate | Count successful snooze vs. total user interactions | 60-70% typical (varies by message) | Extreme variance (< 20% or > 90%) |
+| Reboot button click rate | Count reboot events at Stage 3/4 | 20-30% typical | Deviation outside typical range |
+| Dismiss button click rate (v2.24+) | Count dismiss events at Stages 0-3 | 10-15% typical | Deviation outside typical range |
+| Escalation rate (users reaching Stage 4) | Count Stage 4 deployments / total Stage 0 | 5-15% typical (depends on urgency) | Unexpectedly high (> 30%) suggests messaging ineffective |
+| Handler error rate | Count exceptions/failures in handler logs | < 1% | Increase in handler failures |
+| Fallback notification rate | Count fallback events (WinRT unavailable) / total | < 5% | Sudden increase suggests corporate policy change |
+| Registry state corruption rate | Sample endpoints; verify Completed value matches final stage | < 0.1% | Any corruption detected |
+| Scheduled task failures | Count task execution failures in Event Log | < 1% | Increase in task failures |
+
+**2. Compliance Verification**
+
+| Activity | Frequency | Procedure | Evidence |
+|----------|-----------|-----------|----------|
+| ISO 9001 Change Log Audit | Monthly | Verify changelog entry exists for any production deployment or hotfix; confirm version number incremented; document reviewer and approval | Change Log section in TECHNICAL_DOCUMENTATION_TOAST_v3.0.md |
+| ISO 27001 Security Assessment Review | Quarterly | Review security test results (Section 16.2); confirm all PASS; identify any NEW security findings; document remediation | Updated Section 12.3.x (ISO Assessment) |
+| Handler Log Archive | Monthly | Archive handler logs to long-term storage for compliance audit trail; retention policy: 1 year minimum | Log file counts; archive location and integrity |
+| Deployment Parameter Audit | Per deployment | Verify all deployment parameters documented in SCCM package comments; confirm -ToastGUID stable across all baseline updates (v2.43+) | SCCM package audit trail; parameter documentation |
+| Registry Permissions Audit | Quarterly | Verify DACL on registry keys and scheduled tasks has not changed (should not require modification after initial deployment); confirm least privilege principle maintained | Registry DACL verification script results; Task Scheduler ACL export |
+
+**3. Incident Response and Escalation**
+
+Establish escalation procedures for production issues:
+
+| Issue Category | Detection Method | First Response | Escalation Path |
+|---|---|---|---|
+| Toast not displaying (> 10% endpoints) | Monitor alert on toast success rate | Check WinRT assembly availability; check Event Log for access denied; verify XML syntax in SCCM package | Escalate to Security Team (possible corporate policy blocking) |
+| Duplicate toasts during SCCM re-trigger | Monitor escalation timing; check for re-trigger events during active snoozes | Verify -ToastGUID stability in SCCM package (must be identical across baseline updates); confirm v2.43+ deployed | If GUID not stable, update SCCM package immediately; re-deploy with stable GUID |
+| Handler script failures (> 5% of buttons clicked) | Monitor handler error logs | Check handler log for exceptions; verify PowerShell execution policy; check for dependency issues | Escalate to development team with failing handler logs and endpoint environment details |
+| Scheduled task creation failures (> 5% endpoints) | Monitor Task Scheduler Event Log; count RegisterScheduledTask failures | Check for permission issues (if HKLM registry mode, verify SYSTEM deployment context); check disk space; verify Task Scheduler service is running | Escalate to Windows platform team if Task Scheduler service issues detected |
+| SCCM re-trigger causing escalation loops (v2.43+ only) | Monitor for abnormally high Stage 4 escalation rates during baseline re-evaluation windows | Verify v2.43+ deployed; check -ToastGUID stability (guards only work with stable GUID); manually test re-trigger scenario on lab endpoint | If guards non-functional, verify GUID passed to Toast_Notify.ps1; update SCCM package if GUID is randomized |
+| Unexpected high fallback rate (> 20% endpoints) | Monitor FallbackNotifications.log; count fallback entries | Likely cause: corporate antivirus or Group Policy blocking WinRT API; check Group Policy Objects for restrictions; test on pilot endpoint with security exception | Escalate to Corporate Security Team; request exception for toast notification WinRT access; may require GPO modification |
+
+#### 12.27.6 Post-Deployment Compliance Mapping (ISO 9001 / ISO 27001)
+
+The following table maps post-deployment validation activities to relevant ISO compliance controls:
+
+| ISO Control | Requirement | Toast Validation Activity | Evidence Location |
+|---|---|---|---|
+| ISO 9001:2015 Section 4.4 | Documented Information Control - Version tracking, change history, approval workflow | Revision history maintained in Section 15 (Revision History Table); each deployment documents version deployed and date; change log section documents all modifications | TECHNICAL_DOCUMENTATION_TOAST_v3.0.md Revision History; SCCM Deployment Records |
+| ISO 9001:2015 Section 7.5 | Documented Information Requirements - Information must be available, reviewed, approved before use | Phase 1 Pilot Validation ensures toast displays correctly before Phase 2 rollout; Phase 2 staged rollout validates across diverse endpoints before production | Phase 1-3 Validation Checklists (Section 12.27.3-12.27.5) |
+| ISO 9001:2015 Section 8.2.3 | Product / Service Requirements must be reviewed for completeness | Pre-Deployment Checklist (Section 12.27.2) verifies all required components (XML, handler scripts, protocol handlers) are present and functional before rollout | Pre-Deployment Checklist Status Records |
+| ISO 27001:2015 A.5.1.1 | Information security policies - documented and communicated | Toast Notification Security Controls documentation (SECURITY_CONTROLS_TOAST_v3.0.md) defines security policies; Phase 1-3 validation confirms implementation | SECURITY_CONTROLS_TOAST_v3.0.md; Phase 1-3 Evidence Collection |
+| ISO 27001:2015 A.9.4.1 | Access Control - Principle of least privilege; access based on business need | Validation confirms DACL permissions on scheduled tasks restrict access to intended principals only (SYSTEM, USERS, INTERACTIVE) | Phase 1 Task Validation (Section 12.27.3, Table: Scheduled Task Validation); Task Scheduler ACL export |
+| ISO 27001:2015 A.14.2.1 | Secure development policy - change control, security testing, documentation | Phase 1 Security Testing (Section 12.27.3, Table: Toast Display Verification, Progressive Enforcement, Registry State, Scheduled Task, Fallback) validates all code changes are secure before production | Phase 1 test evidence; Handler logs; Registry verification screenshots |
+| ISO 27001:2015 A.14.2.5 | Secure system engineering - defense-in-depth, input validation, error handling | Phase 1 includes Fallback Notification Testing to ensure 4-tier fallback system works if primary WinRT path fails; Phase 3 monitoring tracks fallback rate | Phase 1 Fallback Testing results; Phase 3 Fallback rate monitoring (Section 12.27.5) |
+| ISO 27001:2015 A.16.1.2 | Response to information security incidents - incident logging and escalation | Section 12.27.5 (Phase 3) establishes escalation procedures for production issues; critical issues escalated to appropriate team (Security, Development, Windows Platform) | Escalation Path documentation (Section 12.27.5, Table: Incident Response) |
+
+#### 12.27.7 Validation Record Retention
+
+All validation records generated during Phase 1, 2, and 3 must be retained for ISO audit compliance:
+
+**Retention Policy:**
+
+| Record Type | Retention Period | Location | Responsibility |
+|---|---|---|---|
+| Phase 1 Pilot Testing Screenshots and Logs | 3 years | C:\ProgramData\ToastNotification\ValidationRecords\Phase1\ | IT Operations / Deployment Engineer |
+| Phase 2 Staged Rollout Telemetry and Log Analysis | 3 years | C:\ProgramData\ToastNotification\ValidationRecords\Phase2\ | IT Operations / Monitoring Team |
+| Phase 3 Production Monitoring Metrics and Incident Reports | 3 years | C:\ProgramData\ToastNotification\ValidationRecords\Phase3\ | IT Operations / Incident Management |
+| SCCM Deployment Package Audit Trail | 3 years | MEMCM CM_PackageHistory / SCCM database | SCCM Administrator |
+| Handler Execution Logs | 1 year | Organized by endpoint in C:\ProgramData\ToastNotification\{GUID}\Logs\ | Windows File Server (centralized logging) |
+| Compliance Assessment Reports (ISO 9001/27001) | 6 years (per ISO retention) | ComplianceLibrary\ToastNotification\v3.0\ | Compliance Officer |
+
+**Archive Procedure (recommended quarterly):**
+
+1. Consolidate Phase 1, 2, 3 validation records into archive package
+2. Create checksum verification file (MD5 hash of all records for integrity verification)
+3. Store in ISO-compliant long-term archival location (with access controls, encryption, backup)
+4. Update compliance audit trail with archive location and retrieval procedure
+
+#### 12.27.8 Future Toast_Notify.ps1 Version Validation
+
+This framework is designed to be reusable for future versions (v2.44+, v2.50+, v3.0+, etc.). When deploying new versions:
+
+1. **Pre-Deployment:** Update Pre-Deployment Checklist (Section 12.27.2) with new version number and any new parameters/features
+2. **Phase 1 (Pilot):** Execute Phase 1 validation checklists; add new test cases for any new features introduced in new version
+3. **Phase 2 (Staged Rollout):** Execute Phase 2 monitoring; track metrics for new features if applicable
+4. **Phase 3 (Production):** Execute Phase 3 ongoing monitoring; archive records for version
+5. **Document:** Update TECHNICAL_DOCUMENTATION_TOAST_v3.0.md with new revision history entry, new version changelog section (e.g., 12.28), and any security assessment updates
+
+**Example for hypothetical v2.44:**
+- Section 12.28 [Change Log for v2.44 (Toast_Notify.ps1) - New Feature XYZ](#1228-change-log-for-v244-toast_notifyps1-new-feature-xyz)
+- Update Table of Contents with link to 12.28
+- Add new security test cases to Section 16.2 (e.g., SEC-051 through SEC-060)
+- Update Phase 1 test cases in 12.27.3 to include validation of new feature XYZ
+
+---
+
 ### 16.2 Security Testing Results
 
 **Test Plan ID:** SEC-TEST-TOAST-v3.0
@@ -5786,5 +6067,5 @@ Action Snooze Dismiss Reboot
 
 *End of Technical Documentation - Progressive Toast Notification System v3.0*
 
-*Version: 4.6 | Date: 2026-04-10*
+*Version: 4.7 | Date: 2026-04-22*
 *Licensed under GNU General Public License v3*

@@ -3,6 +3,7 @@
 A PowerShell-based enterprise toast notification system for Windows 10/11 with progressive enforcement, designed for SCCM/Intune deployment.
 
 **Current version:** Toast_Notify.ps1 v2.43
+**Documentation version:** v4.7
 **Production release:** v1.0.0
 
 ---
@@ -245,7 +246,7 @@ The following custom URI protocols are registered during SYSTEM deployment:
 | `src/BadgeImage_HP.jpg` | - | HP badge image (replace as needed) |
 | `src/HeroImage_BIOS.jpg` | - | HP hero image (replace as needed) |
 | `examples/CustomMessage.xml` | - | Minimal XML template |
-| `docs/TECHNICAL_DOCUMENTATION_TOAST_v3.0.md` | v4.6 | Full ISO 9001 technical documentation |
+| `docs/TECHNICAL_DOCUMENTATION_TOAST_v3.0.md` | v4.7 | Full ISO 9001 technical documentation |
 | `docs/IMAGE_CREATION_GUIDE.md` | - | Image size and format requirements |
 
 ---
@@ -284,9 +285,9 @@ The following custom URI protocols are registered during SYSTEM deployment:
 ## Documentation
 
 Full ISO 9001/27001 compliant technical documentation:
-`docs/TECHNICAL_DOCUMENTATION_TOAST_v3.0.md` (v4.6)
+`docs/TECHNICAL_DOCUMENTATION_TOAST_v3.0.md` (v4.7)
 
-Includes architecture, function reference, security assessment, code review records, and full changelog from v2.0 through v2.43.
+Includes architecture, function reference, security assessment, code review records, and full changelog from v2.0 through v2.43. Documentation includes comprehensive revision history, deployment guidance, and ISO compliance mapping.
 
 ---
 

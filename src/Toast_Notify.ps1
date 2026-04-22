@@ -5,6 +5,13 @@ Created by:   Ben Whitmore
 Filename:     Toast_Notify.ps1
 ===========================================================================
 
+Version 2.44 - 22/04/2026
+-FIX: Added -Force to Register-ScheduledTask for main task (Toast_Notification_{GUID}).
+ Without -Force, re-deployment with a static GUID fails with "cannot create file when
+ it already exists" (0x800700B7) because the previous task persists up to 30 days
+ (DeleteExpiredTaskAfter). Standard users cannot remove SYSTEM-registered tasks, so the
+ task stays until SCCM re-runs. -Force allows SYSTEM to overwrite the expired task.
+
 Version 2.43 - 10/04/2026
 -FIX: SCCM baseline re-trigger during active snooze now handled correctly
 -Initialize-ToastRegistry returns early (preserves SnoozeCount) if active snooze detected
@@ -1897,7 +1904,7 @@ If ($XMLValid -eq $True) {
             -DontStopIfGoingOnBatteries `
             -DeleteExpiredTaskAfter (New-TimeSpan -Days 30)
         $New_Task = New-ScheduledTask -Description "Toast_Notification_$($ToastGuid) Task for user notification. Title: $($EventTitle) :: Event:$($EventText) :: Source Path: $($ToastPath) " -Action $Task_Action -Principal $Task_Principal -Trigger $Task_Trigger -Settings $Task_Settings
-        Register-ScheduledTask -TaskName "Toast_Notification_$($ToastGuid)" -InputObject $New_Task
+        Register-ScheduledTask -TaskName "Toast_Notification_$($ToastGuid)" -InputObject $New_Task -Force
 
         Stop-Transcript
     }
