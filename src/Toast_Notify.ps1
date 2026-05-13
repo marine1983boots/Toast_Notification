@@ -5,6 +5,23 @@ Created by:   Ben Whitmore
 Filename:     Toast_Notify.ps1
 ===========================================================================
 
+Version 2.45 - 13/05/2026
+-FIX: Toast notifications no longer re-display after an OS reboot (Start->Restart, maintenance
+ window, Windows Update) when the user had an active snooze cycle.
+-Root cause: snooze tasks registered with StartWhenAvailable=true survive any reboot and fire
+ on next login. Without the Reboot Now button being clicked, no cleanup occurred.
+-Detection: compares Win32_OperatingSystem.LastBootUpTime against a new LastUserShown registry
+ value (written only in user context). If LastBootTime > LastUserShown, reboot is detected.
+-New registry value LastUserShown (set only in user context, never by SYSTEM Initialize-ToastRegistry)
+ provides safe backward compatibility: in-flight v2.44 deployments have no LastUserShown value,
+ so the reboot check is skipped until v2.45 runs once in user context for that GUID.
+-New function Test-SystemRebooted: compares boot time vs LastUserShown. Returns $false on any
+ error or absent value (safe default: show toast, never suppress incorrectly).
+-New function Invoke-ToastCleanup: extracted from Stage 4 inline block. Removes snooze tasks
+ (user-created, user-removable), fallback task, attempts main task disable (non-fatal,
+ SYSTEM-created), removes/marks registry key. Called by both Stage 4 and reboot detection.
+-Guard SnoozeCount > 0 prevents false-positive on Stage 0 (first show, no snooze cycle yet).
+
 Version 2.44 - 22/04/2026
 -FIX: Added -Force to Register-ScheduledTask for main task (Toast_Notification_{GUID}).
  Without -Force, re-deployment with a static GUID fails with "cannot create file when
@@ -673,6 +690,157 @@ function Initialize-ToastRegistry {
         return $false
     }
 }
+
+
+function Test-SystemRebooted {
+    <#
+    .SYNOPSIS
+        Returns $true if the system has rebooted since the given timestamp.
+    .PARAMETER LastUserShown
+        ISO 8601 sortable timestamp written by user-context execution (registry LastUserShown).
+        Must only be passed a value that was set in user context - never SYSTEM init time.
+    .NOTES
+        Returns $false on any error or empty input - safe default ensures toast is shown
+        rather than incorrectly suppressed on failure.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$LastUserShown
+    )
+
+    if ([string]::IsNullOrEmpty($LastUserShown)) {
+        return $false
+    }
+    try {
+        $LastBootTime      = (Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime
+        $LastUserShownTime = [DateTime]::Parse($LastUserShown)
+        if ($LastBootTime -gt $LastUserShownTime) {
+            Write-Output "[INFO] OS reboot detected: LastBootTime=$LastBootTime, LastUserShown=$LastUserShownTime"
+            return $true
+        }
+    }
+    catch {
+        Write-Warning "Test-SystemRebooted: could not compare boot times - $($_.Exception.Message)"
+    }
+    return $false
+}
+
+
+function Invoke-ToastCleanup {
+    <#
+    .SYNOPSIS
+        Removes all scheduled tasks and registry state for a toast GUID.
+    .DESCRIPTION
+        Runs in user context. Snooze and fallback tasks are user-created and can be
+        unregistered by the same user. The main SYSTEM-created task cannot be removed
+        from user context (Access Denied) - this is non-fatal since it has an EndBoundary
+        and no StartWhenAvailable, so it will not re-fire after reboot regardless.
+        Called by both Stage 4 auto-reboot and OS-reboot detection paths.
+    .PARAMETER ToastGUID
+        The GUID identifying this toast instance.
+    .PARAMETER RegistryHive
+        Registry hive where toast state is stored (HKLM, HKCU, Custom).
+    .PARAMETER RegistryPath
+        Registry path under the hive.
+    .PARAMETER Username
+        The username whose tasks should be cleaned up (pass $env:USERNAME).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ToastGUID,
+
+        [Parameter(Mandatory = $true)]
+        [string]$RegistryHive,
+
+        [Parameter(Mandatory = $true)]
+        [string]$RegistryPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Username
+    )
+
+    Write-Output "Invoke-ToastCleanup: removing toast artefacts for GUID $ToastGUID (user: $Username)"
+
+    # 1. Remove registry key. User has FullControl on GUID key via Grant-RegistryPermissions.
+    #    Remove-Item requires KEY_WRITE on parent key - may be denied from user context.
+    #    Fall back to Completed=1 if removal fails (proven reliable pattern from Toast_Reboot_Handler.ps1 v1.4+).
+    $RegKeyPath = "${RegistryHive}:\${RegistryPath}\$ToastGUID"
+    try {
+        if (Test-Path $RegKeyPath) {
+            Remove-Item -Path $RegKeyPath -Recurse -Force -ErrorAction Stop
+            Write-Output "[OK] Registry state removed: $RegKeyPath"
+        }
+        else {
+            Write-Output "[INFO] Registry key not found (already removed): $RegKeyPath"
+        }
+    }
+    catch {
+        Write-Warning "Could not remove registry key ($($_.Exception.Message)) - setting Completed=1 as fallback"
+        try {
+            Set-ItemProperty -Path $RegKeyPath -Name "Completed" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+        }
+        catch { }
+    }
+
+    # 2. Unregister user-specific snooze tasks (user-created - user context can remove these).
+    #    Format: Toast_Notification_{GUID}_{Username}_Snooze{N}
+    for ($i = 1; $i -le 10; $i++) {
+        $TaskName = "Toast_Notification_${ToastGUID}_${Username}_Snooze${i}"
+        try {
+            $Task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+            if ($Task) {
+                Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop
+                Write-Output "[OK] Snooze task removed: $TaskName"
+            }
+            elseif ($i -gt 1) {
+                break
+            }
+        }
+        catch {
+            Write-Warning "Could not remove task ${TaskName}: $($_.Exception.Message)"
+        }
+    }
+
+    # 3. Unregister fallback task (user-created - user context can remove).
+    #    Format: Toast_Notification_{GUID}_{Username}_Fallback
+    $FallbackTaskName = "Toast_Notification_${ToastGUID}_${Username}_Fallback"
+    try {
+        $FallbackTask = Get-ScheduledTask -TaskName $FallbackTaskName -ErrorAction SilentlyContinue
+        if ($FallbackTask) {
+            Unregister-ScheduledTask -TaskName $FallbackTaskName -Confirm:$false -ErrorAction Stop
+            Write-Output "[OK] Fallback task removed: $FallbackTaskName"
+        }
+        else {
+            Write-Output "[INFO] No fallback task found: $FallbackTaskName"
+        }
+    }
+    catch {
+        Write-Warning "Fallback task removal non-fatal: $($_.Exception.Message)"
+    }
+
+    # 4. Attempt to disable main task (SYSTEM-created - will fail with Access Denied from user context).
+    #    Non-fatal: main task has EndBoundary and no StartWhenAvailable, cannot re-fire after reboot.
+    #    Mirrors behaviour documented in Toast_Reboot_Handler.ps1 v1.5.
+    $MainTaskName = "Toast_Notification_$ToastGUID"
+    try {
+        $MainTask = Get-ScheduledTask -TaskName $MainTaskName -ErrorAction SilentlyContinue
+        if ($MainTask) {
+            Disable-ScheduledTask -TaskName $MainTaskName -ErrorAction Stop | Out-Null
+            Write-Output "[OK] Main notification task disabled: $MainTaskName"
+        }
+        else {
+            Write-Output "[INFO] Main notification task not found: $MainTaskName"
+        }
+    }
+    catch {
+        Write-Output "[INFO] Main task disable non-fatal (SYSTEM-owned, Access Denied expected): $($_.Exception.Message)"
+    }
+
+    Write-Output "[OK] Invoke-ToastCleanup completed for GUID $ToastGUID"
+}
+
 
 function Initialize-SnoozeTasks {
     <#
@@ -1936,6 +2104,36 @@ If ($XMLValid -eq $True) {
                     Stop-Transcript
                     exit 0
                 }
+
+                # Detect OS reboot since last toast session (v2.45).
+                # Snooze tasks have StartWhenAvailable=true and survive any reboot, firing on
+                # next login even when the user has already rebooted via the OS. Detect this and
+                # clean up artefacts so the toast is not re-displayed unnecessarily.
+                # Guard: SnoozeCount > 0 prevents false-positive on Stage 0 (first show, no active snooze).
+                # Guard: LastUserShown must exist - absence means in-flight v2.44 deployment where
+                #        the value has not yet been written; skip the check to avoid false-positives.
+                if ($SnoozeCount -gt 0 -and $RegState.LastUserShown) {
+                    if (Test-SystemRebooted -LastUserShown $RegState.LastUserShown) {
+                        Write-Output "[INFO] OS reboot detected since last toast session - user has already rebooted. Suppressing re-display and cleaning up artefacts."
+                        Invoke-ToastCleanup -ToastGUID $ToastGUID -RegistryHive $RegistryHive -RegistryPath $RegistryPath -Username $env:USERNAME
+                        Stop-Transcript
+                        exit 0
+                    }
+                }
+
+                # Write LastUserShown - user-context-only timestamp used by Test-SystemRebooted.
+                # Never written by SYSTEM context. Written here so the next snooze task has an
+                # accurate baseline: LastBootTime is compared against when the user last ran a
+                # toast session, not when SCCM deployed (which is what LastShown reflects).
+                try {
+                    Set-ItemProperty -Path "${RegistryHive}:\${RegistryPath}\$ToastGUID" `
+                        -Name "LastUserShown" -Value (Get-Date).ToString('s') -ErrorAction SilentlyContinue
+                    Write-Output "[OK] LastUserShown updated: $(Get-Date -Format 's')"
+                }
+                catch {
+                    Write-Warning "Could not update LastUserShown: $($_.Exception.Message)"
+                }
+
             }
             else {
                 Write-Warning "Registry state not found for ToastGUID: $ToastGUID - using default SnoozeCount: 0"
@@ -2595,86 +2793,9 @@ If ($XMLValid -eq $True) {
                 }
 
                 # --- Stage 4 artefact cleanup ---
-                # Mirrors Toast_Reboot_Handler.ps1 cleanup pattern (non-fatal, ASCII markers only).
-                # Without this block, the snooze task that triggered Stage 4 (e.g. _Snooze3) survives
-                # the reboot and re-fires, showing the toast again unnecessarily.
+                # Extracted to Invoke-ToastCleanup (v2.45) - also used by OS-reboot detection path.
                 Write-Output "Cleaning up toast artefacts to prevent re-display after reboot..."
-
-                # 1. Remove registry state for this toast GUID
-                $RegKeyPath = "${RegistryHive}:\${RegistryPath}\$ToastGUID"
-                try {
-                    if (Test-Path $RegKeyPath) {
-                        Remove-Item -Path $RegKeyPath -Recurse -Force -ErrorAction Stop
-                        Write-Output "[OK] Registry state removed: $RegKeyPath"
-                    }
-                    else {
-                        Write-Output "[INFO] Registry key not found (already removed or not created): $RegKeyPath"
-                    }
-                }
-                catch {
-                    Write-Warning "Could not remove registry key: $($_.Exception.Message)"
-                    Write-Warning "Continuing with reboot - registry cleanup non-fatal"
-                }
-
-                # 2. Unregister all user-specific snooze tasks for this GUID
-                # v1.9+: task names include username to deconflict multi-user endpoints
-                # Format: Toast_Notification_{GUID}_{Username}_Snooze{N}
-                $CleanupUsername = $env:USERNAME
-                for ($i = 1; $i -le 10; $i++) {
-                    $TaskName = "Toast_Notification_${ToastGUID}_${CleanupUsername}_Snooze${i}"
-                    try {
-                        $Task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-                        if ($Task) {
-                            Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop
-                            Write-Output "[OK] Snooze task removed: $TaskName"
-                        }
-                        else {
-                            # No more tasks at this index - stop looking
-                            if ($i -gt 1) { break }
-                        }
-                    }
-                    catch {
-                        Write-Warning "Could not remove task ${TaskName}: $($_.Exception.Message)"
-                        Write-Warning "Continuing - task cleanup non-fatal"
-                    }
-                }
-
-                # 2b. Unregister fallback task (pre-scheduled by v2.26+)
-                # Stage 4 is the authoritative resolution - fallback must be removed.
-                $FallbackTaskName = "Toast_Notification_${ToastGUID}_${CleanupUsername}_Fallback"
-                try {
-                    $FallbackTask = Get-ScheduledTask -TaskName $FallbackTaskName -ErrorAction SilentlyContinue
-                    if ($FallbackTask) {
-                        Unregister-ScheduledTask -TaskName $FallbackTaskName -Confirm:$false -ErrorAction Stop
-                        Write-Output "[OK] Fallback task removed: $FallbackTaskName"
-                    }
-                    else {
-                        Write-Output "[INFO] No fallback task found: $FallbackTaskName"
-                    }
-                }
-                catch {
-                    Write-Warning "[!] Fallback task removal non-fatal: $($_.Exception.Message)"
-                }
-
-                # 3. Disable main notification task to prevent re-display after reboot
-                # Use Disable-ScheduledTask (not Unregister) - matches reboot handler pattern.
-                # Without this, Toast_Notification_{GUID} fires again after restart.
-                $MainTaskName = "Toast_Notification_$ToastGUID"
-                try {
-                    $MainTask = Get-ScheduledTask -TaskName $MainTaskName -ErrorAction SilentlyContinue
-                    if ($MainTask) {
-                        Disable-ScheduledTask -TaskName $MainTaskName -ErrorAction Stop | Out-Null
-                        Write-Output "[OK] Main notification task disabled: $MainTaskName"
-                    }
-                    else {
-                        Write-Output "[INFO] Main notification task not found: $MainTaskName"
-                    }
-                }
-                catch {
-                    Write-Warning "Could not disable main task ${MainTaskName}: $($_.Exception.Message)"
-                    Write-Warning "Continuing - task cleanup non-fatal"
-                }
-
+                Invoke-ToastCleanup -ToastGUID $ToastGUID -RegistryHive $RegistryHive -RegistryPath $RegistryPath -Username $env:USERNAME
                 Write-Output "[OK] Artefact cleanup completed - reboot countdown active"
             }
         }
